@@ -480,7 +480,11 @@ impl Core {
                 rec.turn = turn + (was.as_deref() == Some("working") && now.as_deref() != Some("working")) as u64;
                 if now == was {
                     rec.status_ms = since;
-                    rec.reporter = reporter; // the same facts, from the program or job that made them
+                }
+                // The same word from a group still running: most likely the same facts from it.
+                // Another job may have said it after that group ended; then the next poll names it.
+                if now == was && reporter.is_some_and(|g| !crate::platform::group_gone(g)) {
+                    rec.reporter = reporter;
                 }
                 // Only a changed final word/turn proves new activity in a crash replay.
                 // A repeated done, or done -> idle, entirely during downtime can remain unobservable.

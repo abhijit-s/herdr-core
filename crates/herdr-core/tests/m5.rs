@@ -296,3 +296,23 @@ fn a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it() {
         assert_eq!(get(&s, &t)["status"], Value::Null, "{recovery}: it stays reset");
     }
 }
+
+#[test]
+fn a_crash_does_not_blame_a_new_job_for_an_old_ones_exit() {
+    let s = polled();
+    let t = shell_running(&s, &["r state=blocked; w a", "r state=blocked; w b"]);
+    job_said(&s, &t, "blocked");
+    std::thread::sleep(Duration::from_millis(2500)); // its name saved (within SAVE_SOON)
+    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    wait_until("core absent", || !s.connect_ok());
+    // While the core is down, the first job ends and the next says the same word.
+    touch(&s, "a");
+    touch(&s, "go1");
+    std::thread::sleep(Duration::from_millis(500));
+    wait_until("adopted, the next job in front", || job_in_front(&s, &t));
+    std::thread::sleep(Duration::from_millis(300)); // many polls
+    assert_eq!(state(&s, &t), "blocked", "the next job's word");
+    touch(&s, "b");
+    wait_until("reset when it ends", || get(&s, &t)["status"].is_null());
+}
