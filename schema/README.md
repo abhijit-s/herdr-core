@@ -217,3 +217,5 @@ A terminal's status is whatever its program reported through OSC 7501, the
 Program Status Protocol (`idle`, `working`,
 `done`, `blocked`, `error`, ...), stored as reported. hc never infers status
 from the screen. Programs that don't speak 7501 have no status.
+
+A status lasts as long as what reported it. When the terminal's program ends, its status is cleared (a `status` event, and a `turn` event if it was `working`). When a job the program runs in front reported it, such as an agent started from a shell, the status is cleared the same way once that job has ended and something else is in front, usually the shell again. While the job lives, even stopped or running its own tools, its status stays. Windows has no foreground jobs on a pseudo console, so there a status lasts until the terminal's program ends.

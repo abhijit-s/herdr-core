@@ -1047,6 +1047,13 @@ impl Pty {
     }
 }
 
+/// Never asked: with no process groups on a pseudo console, the foreground is
+/// always the program (`Pty::foreground`), so every status report is its own
+/// and lasts until it exits. A job a shell runs there can't be told apart.
+pub fn group_gone(_pgid: i32) -> bool {
+    false
+}
+
 /// Waits for it to end: (exit code, no signal on Windows). Then closes its
 /// console, so its last output arrives and the reader ends.
 pub fn wait(child: &mut Process) -> io::Result<(Option<i32>, Option<i32>)> {
