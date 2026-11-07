@@ -13,3 +13,10 @@ This fork of [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core) is th
 - Rebuilds: build.rs reruns when HEAD, its reflog, its branch or `packed-refs` change (paths from `git rev-parse`, so worktrees work), and on edits under `crates/herdr-core/src`. Not on index changes: editors and `git status` rewrite the index, and each rerun recompiles the crate. So an edit elsewhere in the workspace, or a staged-only change, does not mark the build `.dirty` until something else reruns it. Worktrees need their own target dir (the default): Cargo hashes a package by its path within the workspace, so a shared `CARGO_TARGET_DIR` could keep another worktree's build.
 - Tests: `fork_build::tests` (the `--version` line, a well-formed build, git in a temporary repository: no git gives none, a commit gives its sha, an edit adds `.dirty`, untracked files do not), `tests/m0.rs` (`server status` keeps the version and has a `build`).
 - Files: `crates/herdr-core/{build.rs, fork_build.rs, src/fork_build.rs, src/lib.rs, src/api.rs, src/api/types.rs, src/cli.rs, src/cli/update.rs, tests/m0.rs}`, `schema/hc.openrpc.json`, `scripts/mac-bundle`
+
+### A piped observer ends at end of input
+
+`fix/observe-eof` (fork fix, upstream candidate): `hc attach --observe` with a stdin that is not a terminal and reaches end of input (`< /dev/null`, a closed pipe) spun at about 100% CPU. At EOF stdin stays readable, so `read_stdin` returned None at once on every turn and the attach loop's `None => {}` waited on it again. The loop now ends on None whether or not stdin is a terminal, as the `detached = !tty` comment intended, and prints `[detached from <address>]` like a closed window. A piped attach without `--observe` spun the same way and now ends the same way. One loop serves Unix and Windows, whose `read_stdin` also returns None at end of input, so both are fixed.
+
+- Tests: `tests/m2.rs` `a_piped_observer_ends_when_its_input_does` (exits within 5 s, success, the terminal stays live).
+- Files: `crates/herdr-core/src/attach.rs`, `crates/herdr-core/tests/m2.rs`
