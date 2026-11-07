@@ -6,6 +6,7 @@ app=${2:?usage: mac-bundle herdr-core output.app}
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 version=$("$bin" --version)
 version=${version#hc }
+version=${version%% (fork *}
 mkdir -p "$app/Contents/MacOS"
 cp "$bin" "$app/Contents/MacOS/herdr-core"
 chmod 755 "$app/Contents/MacOS/herdr-core"

@@ -2,10 +2,12 @@
 
 use super::*;
 
-/// What a binary says it is (`hc 0.2.0`), if it is a working hc.
+/// What a binary says it is (`hc 0.2.0`), if it is a working hc. A fork
+/// build's `(fork <sha>)` after the version is left out.
 pub(super) fn version_of(path: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new(path).arg("--version").stdin(std::process::Stdio::null()).output().ok()?;
     let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let v = v.split(" (fork ").next().unwrap_or_default().to_owned();
     (out.status.success() && v.starts_with("hc ")).then_some(v)
 }
 

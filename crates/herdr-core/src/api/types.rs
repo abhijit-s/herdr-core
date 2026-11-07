@@ -136,6 +136,9 @@ pub struct HolderInfo {
 pub struct StatusResult {
     pub core: CoreInfo,
     pub version: String,
+    /// Which fork commit this hc was built from: `fork.<short sha>`, with
+    /// `.dirty` for uncommitted changes. Null for a build without git.
+    pub build: Option<String>,
     pub pid: u32,
     pub uptime_ms: u64,
     /// The holder new terminals go to.

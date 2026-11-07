@@ -22,7 +22,7 @@ use output::*;
 use update::*;
 
 #[derive(Parser)]
-#[command(name = "hc", version, about = "herdr-core: a terminal runtime for coding agents")]
+#[command(name = "hc", version = crate::fork_build::VERSION.as_str(), about = "herdr-core: a terminal runtime for coding agents")]
 struct Cli {
     /// JSON output even in a terminal.
     #[arg(long, global = true)]
