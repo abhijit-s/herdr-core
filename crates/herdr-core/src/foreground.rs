@@ -175,8 +175,13 @@ impl Core {
                 if pgid > 0
                     && let Some(change) = crate::status::foreground_seen(t, pgid, crate::platform::group_gone)
                 {
-                    t.first_task_turn = None; // as when the program exits
+                    // As when the program exits: a launch task it never finished is news.
+                    let task_pending = t.first_task_turn.take().is_some();
+                    let turn_ended = change.turn_ended;
                     self.status_changed(&mut st, id, change);
+                    if task_pending && !turn_ended {
+                        self.news(&mut st, id);
+                    }
                     self.save(&st);
                 } else if st.reg.terminals[&id].reporter != reporter {
                     self.save_soon();
