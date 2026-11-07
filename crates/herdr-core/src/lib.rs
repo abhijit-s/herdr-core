@@ -8,6 +8,7 @@ pub mod events;
 pub mod exec;
 pub mod files;
 pub mod foreground;
+pub mod fork_build;
 pub mod holder;
 pub mod holder_proto;
 pub mod input;

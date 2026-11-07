@@ -32,6 +32,11 @@ fn autostarts_and_keeps_its_identity_across_restarts() {
     assert_eq!(id.len(), 32);
     assert!(!first["core"]["name"].as_str().unwrap().is_empty());
     let pid = first["pid"].as_i64().unwrap();
+    assert_eq!(first["version"], env!("CARGO_PKG_VERSION"), "the version stays upstream's");
+    assert!(
+        first.get("build").is_some_and(|b| b.is_null() || b.as_str().is_some_and(|b| b.starts_with("fork."))),
+        "{first}"
+    );
 
     s.json(&["server", "stop"]);
     wait_until("core exit", || !pid_alive(pid));

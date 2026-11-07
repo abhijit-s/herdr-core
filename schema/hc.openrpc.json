@@ -986,6 +986,13 @@
       },
       "StatusResult": {
         "properties": {
+          "build": {
+            "description": "Which fork commit this hc was built from: `fork.<short sha>`, with\n`.dirty` for uncommitted changes. Null for a build without git.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "core": {
             "$ref": "#/components/schemas/CoreInfo"
           },

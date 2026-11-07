@@ -205,6 +205,7 @@ async fn server_status(core: Ctx<'_>, _: Empty) -> Result<StatusResult, RpcError
     Ok(StatusResult {
         core: core.info.clone(),
         version: version(),
+        build: crate::fork_build::BUILD.map(str::to_owned),
         pid: std::process::id(),
         uptime_ms: core.started.elapsed().as_millis() as u64,
         holder: holders.iter().find(|h| h.current).cloned(),
