@@ -201,6 +201,7 @@ paths start at your current folder. Prefer explicit paths for remote work.
   report none. Do not guess status from screen text.
 - A status lasts as long as what reported it. An agent run from a shell
   that exits back to the prompt (crash, Ctrl-C) takes its status with it.
+  Not on Windows: there a status lasts until the terminal's program ends.
 - `blocked` means a person is needed (permission or a question): read the
   screen and ask your user. `send` refuses unless `--force`; don't use it to
   bypass a permission decision. `error`: read why, then send or kill.
