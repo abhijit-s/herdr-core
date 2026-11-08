@@ -33,6 +33,19 @@ This fork of [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core) is th
 - Tests: `status::tests::a_job_that_reported_takes_its_facts_with_it`; `tests/m7.rs` `a_launch_task_ends_when_the_job_given_it_exits_to_its_shell`; `tests/m5.rs` `a_crash_does_not_blame_a_new_job_for_an_old_ones_exit`, `a_job_that_exits_to_its_shell_takes_its_status_with_it`, `a_job_keeps_its_status_while_it_runs_its_own_tools_or_waits`, `the_programs_own_status_outlasts_its_jobs_and_ends_with_it`, `a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it`.
 - Files: `crates/herdr-core/src/{status.rs, foreground.rs, terminals.rs, runtime.rs, platform/unix.rs, platform/windows.rs, SKILL.md}`, `crates/herdr-core/tests/{m5.rs, m7.rs}`, `README.md`, `schema/README.md`
 
+### Ghostty's xcframework is skipped
+
+`1af54fa` (fork fix, upstream candidate): with only the Command Line Tools installed, `/usr/bin/xcodebuild` exists but fails, and Ghostty builds its xcframework whenever it finds xcodebuild, so the libghostty-vt build broke. hc links only the static library, so `crates/ghostty-vt/build.rs` passes `-Demit-xcframework=false` on Apple targets.
+
+- Files: `crates/ghostty-vt/build.rs`
+
+### An adoption announces the status it changed
+
+`15f9f14` (fork fix, upstream candidate): adopting a holder without a handover (a core start after a crash, or the relink after reading a holder fails) replayed the tail's OSC 7501 reports into the record but never told subscribers, so `hc get` said one word while event streams kept the old one until they resubscribed. The relink case happens inside a live core with subscribers attached. The core now compares the status facts before and after the replay and emits one `status` event with the final facts when they differ, none when the tail only repeats what subscribers already heard. Turn counting and `status_ms` are unchanged.
+
+- Tests: `runtime::tests::adopting_a_holder_announces_a_status_its_tail_changed`, `adopting_a_holder_whose_tail_repeats_the_status_announces_nothing`.
+- Files: `crates/herdr-core/src/runtime.rs`, `crates/herdr-core/src/runtime/tests.rs`
+
 ## Upstream syncs
 
 ### 2026-11-08: `3965a46..cd12ddd`
@@ -40,7 +53,7 @@ This fork of [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core) is th
 Merged `upstream/master` (10 commits) into the fork's `647bae2`. Every fork change above is kept.
 
 - `c6b316f` a planned restart (`hc update`, `server restart`) hands the old core's environment to the new one (#21).
-- `de6cc39` ending a terminal hangs up its program and foreground job instead of hunting down detached ones, so `nohup` and `setsid` programs keep running; an unexpected holder loss still ends them.
+- `de6cc39` ending a terminal hangs up its program and foreground job instead of hunting down detached ones, so `nohup` and `setsid` programs keep running, background servers among them (their ports stay busy); an unexpected holder loss still ends them. A core start no longer finishes kept records already waiting for a shell as `stopped_by_restart` (`attach_all`), and terminals kept through an update keep their old holder's behaviour until recreated.
 - `aef2dac` the stitch test waits for the final wheel repaint.
 - `ad23942` a starting core or holder gets 15 s before the client reports it failed.
 - `f4ca1c0` `hc attach` keeps a multi-byte character the first paint cut in half (#144).
@@ -54,5 +67,5 @@ Choices:
 
 - No textual conflicts. Eleven files changed on both sides (`attach.rs`, `platform/unix.rs`, `platform/windows.rs`, `runtime.rs`, `terminals.rs`, `api.rs`, `cli.rs`, `lib.rs`, `runtime/tests.rs`, `SKILL.md`, `README.md`), in separate hunks; git's merge is kept as is.
 - `attach.rs`: upstream's `shown()` fix (#144) and the fork's piped-observer end (`detached = !tty`) touch different functions; both stay.
-- `platform/unix.rs`: upstream's `PtyIo` reader, which stops when the holder releases a terminal, sits beside the fork's `group_gone`; the status rule reads process groups, not the PTY, so it is unaffected.
+- `platform/unix.rs`: upstream's `PtyIo`, which makes the master non-blocking and polls a stop pipe before each read and write, sits beside the fork's `group_gone`. Status-on-exit does read the PTY: the foreground poll asks the holder, which calls `tcgetpgrp` on the master (`holder.rs` `FOREGROUND` → `Pty::foreground` in `platform/unix.rs`). That call goes to the master fd directly, not through `PtyIo`, and `O_NONBLOCK` does not change `tcgetpgrp`, so the rule is unaffected.
 - No duplicates to drop: no upstream commit in this range fixes the fork's xcframework build, observe EOF, crash-adoption status announce or status-on-exit, so all four fork fixes stay.
