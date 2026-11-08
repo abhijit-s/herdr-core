@@ -624,6 +624,13 @@ impl Pty {
     }
 }
 
+/// Whether every process in group `pgid` has ended (a pipeline's first
+/// command, its leader, may end long before the rest). One we may not signal
+/// still runs.
+pub fn group_gone(pgid: i32) -> bool {
+    (unsafe { libc::kill(-pgid, 0) }) != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 /// Waits for it to end: (exit code, signal).
 pub fn wait(child: &mut Process) -> io::Result<(Option<i32>, Option<i32>)> {
     loop {

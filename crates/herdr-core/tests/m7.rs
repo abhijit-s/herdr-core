@@ -68,6 +68,30 @@ fn first_task_can_finish_without_a_working_report() {
 }
 
 #[test]
+fn a_launch_task_ends_when_the_job_given_it_exits_to_its_shell() {
+    let mut s = session();
+    s.env.push(("HC_STARTED_MS".into(), "100".into()));
+    s.env.push(("HC_FOREGROUND_MS".into(), "30".into()));
+    let job = s.root.join("job");
+    std::fs::write(&job, script(&s, "stty -echo; r state=idle; read -r task; w finish; exit 0")).unwrap();
+    template(&s, "worker", &format!("---\ncommand: sh -c 'set -m; sh {}; read -r x'\n---\n", job.display()));
+    let parent = s.json(&["run", "--bg", "sleep", "100"])["address"].as_str().unwrap().to_string();
+    let r = s.json(&["run", "--bg", "--parent", &parent, "worker", "first task"]);
+    assert_eq!(r["first_message"]["sent"], true, "{r}");
+    let child = r["address"].as_str().unwrap();
+    let job_in_front = || {
+        let r = s.json(&["get", child]);
+        r["foreground"]["pid"].as_i64().is_some_and(|p| Some(p) != r["pid"].as_i64())
+    };
+    wait_until("the job in front", job_in_front);
+    std::thread::sleep(std::time::Duration::from_millis(300)); // seen there
+    touch(&s, "finish");
+    let r = wait_children(&s, &parent, "any", "5");
+    assert_eq!(r["reason"], "children", "{r}");
+    assert_eq!((&r["children"][0]["ended"], &r["children"][0]["status"]), (&Value::Bool(true), &Value::Null), "{r}");
+}
+
+#[test]
 fn first_task_completion_inside_started_window_is_not_forgotten() {
     for mode in ["all", "any"] {
         let s = session();

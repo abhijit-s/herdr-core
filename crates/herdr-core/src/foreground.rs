@@ -161,15 +161,31 @@ impl Core {
                 let pgid = self.foreground(id).await;
                 let now = (pgid > 0).then(|| about(pgid)).flatten();
                 let mut st = self.lock();
-                let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live() && t.foreground != now) else {
-                    continue;
-                };
-                if let Some(f) = &now {
-                    t.last_cwd = Some(f.cwd.clone());
+                let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live()) else { continue };
+                if t.foreground != now {
+                    if let Some(f) = &now {
+                        t.last_cwd = Some(f.cwd.clone());
+                    }
+                    t.foreground = now.clone();
+                    self.save_soon();
+                    self.emit(&mut st, "foreground", id, serde_json::to_value(&now).unwrap_or_default());
                 }
-                t.foreground = now.clone();
-                self.save_soon();
-                self.emit(&mut st, "foreground", id, serde_json::to_value(&now).unwrap_or_default());
+                let t = st.reg.terminals.get_mut(&id).expect("live terminal");
+                let reporter = t.reporter;
+                if pgid > 0
+                    && let Some(change) = crate::status::foreground_seen(t, pgid, crate::platform::group_gone)
+                {
+                    // As when the program exits: a launch task it never finished is news.
+                    let task_pending = t.first_task_turn.take().is_some();
+                    let turn_ended = change.turn_ended;
+                    self.status_changed(&mut st, id, change);
+                    if task_pending && !turn_ended {
+                        self.news(&mut st, id);
+                    }
+                    self.save(&st);
+                } else if st.reg.terminals[&id].reporter != reporter {
+                    self.save_soon();
+                }
             }
         }
     }
