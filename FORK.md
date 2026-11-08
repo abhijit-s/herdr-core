@@ -32,3 +32,27 @@ This fork of [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core) is th
 - Limits: the reporter is whatever is in front at the first poll after the report. A job that reports and exits before then is taken for the program, which keeps the old behaviour; a program that puts another job in front right after reporting has that job taken for the reporter. Likewise, a job that reports from the background (`agent &`) while another job is in front gets that job recorded, and its status may reset when that job exits. A reused pid keeps the status until it ends too. A job sharing the program's process group (no job control) is the program's.
 - Tests: `status::tests::a_job_that_reported_takes_its_facts_with_it`; `tests/m7.rs` `a_launch_task_ends_when_the_job_given_it_exits_to_its_shell`; `tests/m5.rs` `a_crash_does_not_blame_a_new_job_for_an_old_ones_exit`, `a_job_that_exits_to_its_shell_takes_its_status_with_it`, `a_job_keeps_its_status_while_it_runs_its_own_tools_or_waits`, `the_programs_own_status_outlasts_its_jobs_and_ends_with_it`, `a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it`.
 - Files: `crates/herdr-core/src/{status.rs, foreground.rs, terminals.rs, runtime.rs, platform/unix.rs, platform/windows.rs, SKILL.md}`, `crates/herdr-core/tests/{m5.rs, m7.rs}`, `README.md`, `schema/README.md`
+
+## Upstream syncs
+
+### 2026-11-08: `3965a46..cd12ddd`
+
+Merged `upstream/master` (10 commits) into the fork's `647bae2`. Every fork change above is kept.
+
+- `c6b316f` a planned restart (`hc update`, `server restart`) hands the old core's environment to the new one (#21).
+- `de6cc39` ending a terminal hangs up its program and foreground job instead of hunting down detached ones, so `nohup` and `setsid` programs keep running; an unexpected holder loss still ends them.
+- `aef2dac` the stitch test waits for the final wheel repaint.
+- `ad23942` a starting core or holder gets 15 s before the client reports it failed.
+- `f4ca1c0` `hc attach` keeps a multi-byte character the first paint cut in half (#144).
+- `c0a205e` Windows expands references such as `%ProgramFiles%` left in the system path before spawning terminals.
+- `72f77c4` a terminal command named `hc` or `herdr-core` falls back to the serving core when absent from the terminal's path.
+- `9ce385d` reverts `72f77c4`.
+- `1fe7bc6` Linux service startup and planned restarts work on systemd 239 (#135).
+- `cd12ddd` the saved restart environment is best effort (a failed save still restarts), expires after three minutes and is used once.
+
+Choices:
+
+- No textual conflicts. Eleven files changed on both sides (`attach.rs`, `platform/unix.rs`, `platform/windows.rs`, `runtime.rs`, `terminals.rs`, `api.rs`, `cli.rs`, `lib.rs`, `runtime/tests.rs`, `SKILL.md`, `README.md`), in separate hunks; git's merge is kept as is.
+- `attach.rs`: upstream's `shown()` fix (#144) and the fork's piped-observer end (`detached = !tty`) touch different functions; both stay.
+- `platform/unix.rs`: upstream's `PtyIo` reader, which stops when the holder releases a terminal, sits beside the fork's `group_gone`; the status rule reads process groups, not the PTY, so it is unaffected.
+- No duplicates to drop: no upstream commit in this range fixes the fork's xcframework build, observe EOF, crash-adoption status announce or status-on-exit, so all four fork fixes stay.
