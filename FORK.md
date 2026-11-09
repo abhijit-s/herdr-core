@@ -32,3 +32,41 @@ This fork of [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core) is th
 - Limits: the reporter is whatever is in front at the first poll after the report. A job that reports and exits before then is taken for the program, which keeps the old behaviour; a program that puts another job in front right after reporting has that job taken for the reporter. Likewise, a job that reports from the background (`agent &`) while another job is in front gets that job recorded, and its status may reset when that job exits. A reused pid keeps the status until it ends too. A job sharing the program's process group (no job control) is the program's.
 - Tests: `status::tests::a_job_that_reported_takes_its_facts_with_it`; `tests/m7.rs` `a_launch_task_ends_when_the_job_given_it_exits_to_its_shell`; `tests/m5.rs` `a_crash_does_not_blame_a_new_job_for_an_old_ones_exit`, `a_job_that_exits_to_its_shell_takes_its_status_with_it`, `a_job_keeps_its_status_while_it_runs_its_own_tools_or_waits`, `the_programs_own_status_outlasts_its_jobs_and_ends_with_it`, `a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it`.
 - Files: `crates/herdr-core/src/{status.rs, foreground.rs, terminals.rs, runtime.rs, platform/unix.rs, platform/windows.rs, SKILL.md}`, `crates/herdr-core/tests/{m5.rs, m7.rs}`, `README.md`, `schema/README.md`
+
+### Ghostty's xcframework is skipped
+
+`1af54fa` (fork fix, upstream candidate): with only the Command Line Tools installed, `/usr/bin/xcodebuild` exists but fails, and Ghostty builds its xcframework whenever it finds xcodebuild, so the libghostty-vt build broke. hc links only the static library, so `crates/ghostty-vt/build.rs` passes `-Demit-xcframework=false` on Apple targets.
+
+- Files: `crates/ghostty-vt/build.rs`
+
+### An adoption announces the status it changed
+
+`15f9f14` (fork fix, upstream candidate): adopting a holder without a handover (a core start after a crash, or the relink after reading a holder fails) replayed the tail's OSC 7501 reports into the record but never told subscribers, so `hc get` said one word while event streams kept the old one until they resubscribed. The relink case happens inside a live core with subscribers attached. The core now compares the status facts before and after the replay and emits one `status` event with the final facts when they differ, none when the tail only repeats what subscribers already heard. Turn counting and `status_ms` are unchanged.
+
+- Tests: `runtime::tests::adopting_a_holder_announces_a_status_its_tail_changed`, `adopting_a_holder_whose_tail_repeats_the_status_announces_nothing`.
+- Files: `crates/herdr-core/src/runtime.rs`, `crates/herdr-core/src/runtime/tests.rs`
+
+## Upstream syncs
+
+### 2026-11-08: `3965a46..cd12ddd`
+
+Merged `upstream/master` (10 commits) into the fork's `647bae2`. Every fork change above is kept.
+
+- `c6b316f` a planned restart (`hc update`, `server restart`) hands the old core's environment to the new one (#21).
+- `de6cc39` ending a terminal hangs up its program and foreground job instead of hunting down detached ones, so `nohup` and `setsid` programs keep running, background servers among them (their ports stay busy); an unexpected holder loss still ends them. A core start no longer finishes kept records already waiting for a shell as `stopped_by_restart` (`attach_all`), and terminals kept through an update keep their old holder's behaviour until recreated.
+- `aef2dac` the stitch test waits for the final wheel repaint.
+- `ad23942` a starting core or holder gets 15 s before the client reports it failed.
+- `f4ca1c0` `hc attach` keeps a multi-byte character the first paint cut in half (#144).
+- `c0a205e` Windows expands references such as `%ProgramFiles%` left in the system path before spawning terminals.
+- `72f77c4` a terminal command named `hc` or `herdr-core` falls back to the serving core when absent from the terminal's path.
+- `9ce385d` reverts `72f77c4`.
+- `1fe7bc6` Linux service startup and planned restarts work on systemd 239 (#135).
+- `cd12ddd` the saved restart environment is best effort (a failed save still restarts), expires after three minutes and is used once.
+
+Choices:
+
+- No textual conflicts. Eleven files changed on both sides (`attach.rs`, `platform/unix.rs`, `platform/windows.rs`, `runtime.rs`, `terminals.rs`, `api.rs`, `cli.rs`, `lib.rs`, `runtime/tests.rs`, `SKILL.md`, `README.md`), in separate hunks; git's merge is kept as is.
+- `attach.rs`: upstream's `shown()` fix (#144) and the fork's piped-observer end (`detached = !tty`) touch different functions; both stay.
+- `platform/unix.rs`: upstream's `PtyIo`, which makes the master non-blocking and polls a stop pipe before each read and write, sits beside the fork's `group_gone`. Status-on-exit does read the PTY: the foreground poll asks the holder, which calls `tcgetpgrp` on the master (`holder.rs` `FOREGROUND` → `Pty::foreground` in `platform/unix.rs`). That call goes to the master fd directly, not through `PtyIo`, and `O_NONBLOCK` does not change `tcgetpgrp`, so the rule is unaffected.
+- No duplicates to drop: no upstream commit in this range fixes the fork's xcframework build, observe EOF, crash-adoption status announce or status-on-exit, so all four fork fixes stay.
+- Known cost, kept: `PtyIo`'s poll before every read adds one `poll` per read in the holder. Against the pre-sync build, over 8 alternating isolated passes each, holder syscalls rise 15–20% (+49% for a no-viewer 15 MB `cat`) and holder CPU rises 6–8% under sustained output (median, 7 of 8 pairs). Core CPU falls 2–10%, so total CPU rises 0–5%. This is upstream behaviour, not a fork change; it is a candidate for an upstream issue, and a fork-side fix is not applied. The cost is the price of a cancellable wait: before `PtyIo` the holder made one blocking `read` per chunk, and with `PtyIo` it makes a `poll` and a `read`. Trying the syscall first and polling only on `WouldBlock` is worse, not better, because the holder usually outpaces the program: a failed `read`, then `poll`, then `read`. Measured over 8 passes, holder syscalls were +47–76% against master versus +18–49% for `PtyIo` as merged.
