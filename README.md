@@ -25,7 +25,8 @@ Linux builds are static. On Windows, templates and quoted shell commands need `s
 Run `hc update` to update. Running terminals keep running.
 Updates and `hc server restart` keep the environment the core started with;
 run `hc server restart --fresh` from a terminal outside Herdr to use that shell's
-environment without ending programs. Stopping and starting also takes a fresh one.
+environment without ending programs.
+`hc server start` gives a new core that shell's environment. A core that starts on its own, because any other `hc` command, the app or a plugin found none running, takes the service manager's instead: launchd's on macOS, the systemd user manager's on Linux, the user's settings on Windows. Only hc's own settings (`HC_*`, `HERDR_RELEASES_URL`, session paths) come from whatever started it. Where no service manager starts the core (an ssh login on macOS, Linux without a systemd user manager), it still takes its starter's environment. Set what every terminal needs there (`launchctl setenv`, `~/.config/environment.d/`), or start the core with `hc server start`.
 The update from an older core to 0.1.19 uses the updater's environment once,
 because older cores can't save it for the next core.
 
@@ -168,7 +169,7 @@ cargo build --locked -p herdr-core
 just check
 ```
 
-`just install` installs this checkout and restarts your core. Running terminals keep running. A running core keeps its environment; if none is running, the one it starts gets only the login's own variables (PATH, HOME, USER, SHELL, locale, SSH agent and markers, display, session paths; see `scripts/restart-core.sh`), never the rest of the build shell's.
+`just install` installs this checkout and restarts your core. Running terminals keep running. A running core keeps its environment; if none is running, the one it starts takes the service manager's environment like any core that starts on its own, and without a service manager only the login's own variables (PATH, HOME, USER, SHELL, locale, SSH agent and markers, display, session paths; see `scripts/restart-core.sh`), never the rest of the build shell's.
 
 `just docs` refreshes the command reference. `just docs-check` checks it and the examples; CI runs the same tests.
 
