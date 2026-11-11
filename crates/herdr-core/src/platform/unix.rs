@@ -670,7 +670,7 @@ fn catch_wake() {
 
 /// Lets `WAKE` reach this thread whatever mask it inherited: blocked, it would
 /// stay pending and never end the call. Once per thread, so a read stays one
-/// syscall.
+/// syscall: an IO thread must not block `WAKE` again after its first call.
 fn accept_wake() {
     thread_local!(static ACCEPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
     if ACCEPTED.replace(true) {
@@ -937,7 +937,13 @@ mod pty_io_tests {
 
     #[test]
     fn a_writer_blocked_on_a_full_terminal_ends_on_release() {
-        let marker = marker("excl-write");
+        assert_release_ends_blocked_writers("excl-write");
+    }
+
+    /// A writer blocked on a full terminal ends with `BrokenPipe` on release, on a
+    /// plain terminal and on one its program made exclusive.
+    fn assert_release_ends_blocked_writers(name: &str) {
+        let marker = marker(name);
         for script in std::iter::once("exec sleep 30".to_string()).chain(exclusive(&marker, "time.sleep(30)")) {
             let (_child, pty) = start(&script);
             if script.contains("TIOCEXCL") {
@@ -1013,6 +1019,7 @@ mod pty_io_tests {
                 libc::sigaddset(&mut wake, WAKE);
                 assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, &wake, std::ptr::null_mut()), 0);
             }
+            assert_release_ends_blocked_writers("masked-write");
             assert_release_hangs_up("masked-read");
         })
         .join()
