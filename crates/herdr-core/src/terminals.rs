@@ -64,11 +64,6 @@ pub struct Terminal {
     /// Other 7501 records by id (programs reporting on several things).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub records: BTreeMap<String, crate::status::Status>,
-    /// The foreground process group seen in front after the last 7501 report:
-    /// the program itself, or a job its shell runs. Kept, with no facts, once
-    /// they lapsed with that job (private).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reporter: Option<i32>,
     /// Goes up each time the status leaves `working`.
     #[serde(default)]
     pub turn: u64,
@@ -115,7 +110,7 @@ pub struct Terminal {
     /// viewer must hear it too.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub win32_input: bool,
-    /// The `HC_SCOPE` token everything it started carries, to end them all.
+    /// Crash-only cleanup token: used if its holder is lost, never on a normal end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default)]
@@ -216,6 +211,9 @@ pub struct Registry {
     /// The holder these terminals run under.
     pub holder: Option<String>,
     pub terminals: BTreeMap<u32, Terminal>,
+    /// Viewer drafts saved only for planned handover; older cores ignore this field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drafts: BTreeMap<u32, crate::input::SavedGate>,
 }
 
 #[derive(Default)]
@@ -286,7 +284,6 @@ impl Registry {
                 status: None,
                 status_ms: None,
                 records: BTreeMap::new(),
-                reporter: None,
                 turn: 0,
                 first_task_turn: None,
                 reported: false,
@@ -411,7 +408,6 @@ impl Registry {
 /// The core's own bookkeeping in the record: saved with it, never shown.
 const PRIVATE: &[&str] = &[
     "first_task_turn",
-    "reporter",
     "news",
     "seen",
     "noted",

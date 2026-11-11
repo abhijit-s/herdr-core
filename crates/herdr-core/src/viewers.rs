@@ -193,6 +193,8 @@ impl Core {
     pub fn report_status(&self, st: &mut State, id: u32, reports: &[ghostty_vt::StatusReport]) {
         let word = |st: &State| st.reg.terminals[&id].status.as_ref().map(|s| s.state.clone());
         let mut word_changed = false;
+        st.crash_tails.remove(&id); // older than these
+
         for r in reports {
             let was = word(st);
             let t = st.reg.terminals.get_mut(&id).expect("live terminal");

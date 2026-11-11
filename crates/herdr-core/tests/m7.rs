@@ -68,27 +68,33 @@ fn first_task_can_finish_without_a_working_report() {
 }
 
 #[test]
-fn a_launch_task_ends_when_the_job_given_it_exits_to_its_shell() {
-    let mut s = session();
-    s.env.push(("HC_STARTED_MS".into(), "100".into()));
-    s.env.push(("HC_FOREGROUND_MS".into(), "30".into()));
-    let job = s.root.join("job");
-    std::fs::write(&job, script(&s, "stty -echo; r state=idle; read -r task; w finish; exit 0")).unwrap();
-    template(&s, "worker", &format!("---\ncommand: sh -c 'set -m; sh {}; read -r x'\n---\n", job.display()));
-    let parent = s.json(&["run", "--bg", "sleep", "100"])["address"].as_str().unwrap().to_string();
-    let r = s.json(&["run", "--bg", "--parent", &parent, "worker", "first task"]);
-    assert_eq!(r["first_message"]["sent"], true, "{r}");
-    let child = r["address"].as_str().unwrap();
-    let job_in_front = || {
-        let r = s.json(&["get", child]);
-        r["foreground"]["pid"].as_i64().is_some_and(|p| Some(p) != r["pid"].as_i64())
-    };
-    wait_until("the job in front", job_in_front);
-    std::thread::sleep(std::time::Duration::from_millis(300)); // seen there
-    touch(&s, "finish");
-    let r = wait_children(&s, &parent, "any", "5");
-    assert_eq!(r["reason"], "children", "{r}");
-    assert_eq!((&r["children"][0]["ended"], &r["children"][0]["status"]), (&Value::Bool(true), &Value::Null), "{r}");
+fn a_launch_task_ends_when_the_agent_given_it_exits_to_its_shell() {
+    // Its status left as it was, or cleared before it exits.
+    for last in ["", "r state=clear; "] {
+        let mut s = session();
+        s.env.push(("HC_STARTED_MS".into(), "100".into()));
+        s.env.push(("HC_FOREGROUND_MS".into(), "30".into()));
+        let agent = s.root.join("agent");
+        let body =
+            format!("stty -echo; r state=idle; read -r task; touch {}/read; {last}w finish; exit 0", s.root.display());
+        std::fs::write(&agent, script(&s, &body)).unwrap();
+        // Herdr's shape: run the agent, then become an interactive shell.
+        template(&s, "worker", &format!("---\ncommand: sh {}; exec sh -i\n---\n", agent.display()));
+        let parent = s.json(&["run", "--bg", "sleep", "100"])["address"].as_str().unwrap().to_string();
+        let r = s.json(&["run", "--bg", "--parent", &parent, "worker", "first task"]);
+        assert_eq!(r["first_message"]["sent"], true, "{r}");
+        let child = r["address"].as_str().unwrap();
+        wait_until("the task read", || s.root.join("read").exists());
+        if !last.is_empty() {
+            wait_until("cleared", || s.json(&["get", child])["status"].is_null());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300)); // polled while the agent runs
+        touch(&s, "finish");
+        let r = wait_children(&s, &parent, "any", "5");
+        assert_eq!(r["reason"], "children", "{last:?}: {r}");
+        let child = &r["children"][0];
+        assert_eq!((&child["ended"], &child["status"]), (&Value::Bool(true), &Value::Null), "{last:?}: {r}");
+    }
 }
 
 #[test]

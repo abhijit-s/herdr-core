@@ -298,6 +298,9 @@ impl Listener {
 pub type AsyncRead = tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeServer>;
 pub type AsyncWrite = tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>;
 
+// Duplex named pipes cannot half-close: read EOF means the client disconnected.
+pub async fn reply_closed(_read: &AsyncRead) {}
+
 /// The core's pipe for clients.
 pub struct AsyncListener {
     name: PathBuf,
@@ -357,6 +360,11 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
         return Ok(());
     }
     std::fs::create_dir_all(path)
+}
+
+/// A new file with the user state directory's inherited permissions.
+pub fn private_file(path: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 pub fn try_lock(file: &File) -> bool {
@@ -687,6 +695,11 @@ pub fn machine_id() -> Option<String> {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let line = text.lines().find(|l| l.contains("MachineGuid"))?;
     line.split_whitespace().last().map(String::from)
+}
+
+/// Windows has no SIGTERM handoff; a requested restart is bounded by its expiry.
+pub fn boot_id() -> io::Result<Option<String>> {
+    Ok(None)
 }
 
 // --- Terminals: ConPTY ----------------------------------------------------
@@ -1045,13 +1058,6 @@ impl Pty {
     pub fn hang_up(&self, _pid: u32) {
         unsafe { TerminateJobObject(self.job.as_raw_handle() as HANDLE, 1) };
     }
-}
-
-/// Never asked: with no process groups on a pseudo console, the foreground is
-/// always the program (`Pty::foreground`), so every status report is its own
-/// and lasts until it exits. A job a shell runs there can't be told apart.
-pub fn group_gone(_pgid: i32) -> bool {
-    false
 }
 
 /// Waits for it to end: (exit code, no signal on Windows). Then closes its

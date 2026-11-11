@@ -183,27 +183,54 @@ fn a_send_that_did_not_start_work_is_never_reported_finished() {
     assert_eq!((r["ended"].as_bool(), r["status"].as_str(), r["turn"].as_u64()), (Some(true), Some("done"), Some(1)));
 }
 
-/// A shell with job control running `jobs` (fake agents, each its own file)
-/// in front: the first at once, each later one after `w go<n>`. Then it waits
-/// at its prompt.
-fn shell_running(s: &Session, jobs: &[&str]) -> String {
-    let mut line = String::from("set -m;");
-    for (i, body) in jobs.iter().enumerate() {
-        let path = s.root.join(format!("job{i}"));
-        std::fs::write(&path, script(s, body)).unwrap();
-        if i > 0 {
-            line.push_str(&format!(" w go{i};"));
-        }
-        line.push_str(&format!(" sh {};", path.display()));
-    }
-    line.push_str(" read -r x");
-    run(s, &["sh", "-c", &script(s, &line)])
+/// An interactive shell, polled often, that runs each fake agent when sent.
+fn polled_shell() -> (Session, String) {
+    shell_polled_every("30")
 }
 
-fn polled() -> Session {
+fn shell_polled_every(ms: &str) -> (Session, String) {
     let mut s = session();
-    s.env.push(("HC_FOREGROUND_MS".into(), "30".into()));
-    s
+    s.env.push(("HC_FOREGROUND_MS".into(), ms.into()));
+    let t = run(&s, &["sh", "-m"]);
+    wait_until("the shell in front", || !get(&s, &t)["foreground"].is_null());
+    (s, t)
+}
+
+/// The terminal's record as the core last saved it.
+fn saved(s: &Session, t: &str) -> Value {
+    let file = std::fs::read(s.root.join("state/herdr-core/test/terminals.json")).unwrap_or_default();
+    let state: Value = serde_json::from_slice(&file).unwrap_or_default();
+    state["terminals"][t.trim_start_matches('t')].clone()
+}
+
+fn saved_at_its_shell(r: &Value) -> bool {
+    r["foreground"]["pid"].as_i64().is_some_and(|p| Some(p) == r["pid"].as_i64())
+}
+
+/// Kills the core; the next command starts another, which adopts the holder.
+fn crash(s: &Session) {
+    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    wait_until("core absent", || !s.connect_ok());
+}
+
+/// Whether the running core was started with `var` in its environment. Linux
+/// only: a macOS core started through launchd gets its environment over a
+/// socket, which `ps` doesn't show (a_job_started_after_the_shell_was_saved…
+/// checks the interval there by its timing).
+fn core_env_has(s: &Session, var: &str) -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap();
+    std::fs::read(format!("/proc/{pid}/environ")).unwrap().split(|b| *b == 0).any(|v| v == var.as_bytes())
+}
+
+/// Types `sh <job>` at the shell's prompt; `body` is the fake agent.
+fn start_job(s: &Session, t: &str, name: &str, body: &str) {
+    let path = s.root.join(name);
+    std::fs::write(&path, script(s, body)).unwrap();
+    s.json(&["send", t, &format!("sh {}", path.display())]);
 }
 
 fn job_in_front(s: &Session, t: &str) -> bool {
@@ -211,17 +238,11 @@ fn job_in_front(s: &Session, t: &str) -> bool {
     r["foreground"]["pid"].as_i64().is_some_and(|p| Some(p) != r["pid"].as_i64())
 }
 
-/// Waits until the job in front said `word` and polls have seen it there.
-fn job_said(s: &Session, t: &str, word: &str) {
-    wait_until(word, || state(s, t) == word && job_in_front(s, t));
-    std::thread::sleep(Duration::from_millis(300)); // many polls
-}
-
 #[test]
 fn a_job_that_exits_to_its_shell_takes_its_status_with_it() {
-    let s = polled();
-    let t = shell_running(&s, &["r state=blocked:kind=permission; w a", "r state=working; w b"]);
-    job_said(&s, &t, "blocked");
+    let (s, t) = polled_shell();
+    start_job(&s, &t, "job0", "r state=blocked:kind=permission; w a");
+    wait_until("blocked", || state(&s, &t) == "blocked" && job_in_front(&s, &t));
     let mut conn = s.connect();
     conn.call(1, "events.subscribe", serde_json::json!({"terminal": t}));
     touch(&s, "a");
@@ -229,8 +250,8 @@ fn a_job_that_exits_to_its_shell_takes_its_status_with_it() {
     assert_eq!(ev["params"]["data"]["status"], Value::Null, "{ev}");
     assert_eq!(ev["params"]["data"]["reported"], true, "{ev}");
 
-    touch(&s, "go1");
-    job_said(&s, &t, "working");
+    start_job(&s, &t, "job1", "r state=working; w b");
+    wait_until("working", || state(&s, &t) == "working" && job_in_front(&s, &t));
     touch(&s, "b");
     let ev = next_event(&mut conn, |m| m["params"]["type"] == "turn");
     assert_eq!((ev["params"]["data"]["turn"].as_u64(), &ev["params"]["data"]["state"]), (Some(1), &Value::Null));
@@ -239,44 +260,12 @@ fn a_job_that_exits_to_its_shell_takes_its_status_with_it() {
 }
 
 #[test]
-fn a_job_keeps_its_status_while_it_runs_its_own_tools_or_waits() {
-    let s = polled();
-    // A tool in the job's group, then (once seen) one in front as its own job.
-    let t = shell_running(&s, &["r state=blocked; sleep 0.3; w a; set -m; sleep 0.3; set +m; r state=idle; w b"]);
-    wait_until("the job blocked in front", || state(&s, &t) == "blocked" && job_in_front(&s, &t));
-    std::thread::sleep(Duration::from_millis(400)); // the tool came and went
-    assert_eq!(state(&s, &t), "blocked");
-    touch(&s, "a");
-    wait_until("its own job in front", || get(&s, &t)["foreground"]["argv"] == serde_json::json!(["sleep", "0.3"]));
-    assert_eq!(state(&s, &t), "blocked");
-    wait_until("idle", || state(&s, &t) == "idle");
-    std::thread::sleep(Duration::from_millis(300)); // many polls
-    assert_eq!(state(&s, &t), "idle", "alive and idle");
-}
-
-#[test]
-fn the_programs_own_status_outlasts_its_jobs_and_ends_with_it() {
-    let s = polled();
-    let t = agent(&s, "r state=blocked; w a; set -m; sleep 0.3; w b; exit 0");
-    wait_until("blocked", || state(&s, &t) == "blocked");
-    std::thread::sleep(Duration::from_millis(300)); // seen in front
-    touch(&s, "a");
-    wait_until("a job in front", || get(&s, &t)["foreground"]["name"] == "sleep");
-    wait_until("the program in front again", || !job_in_front(&s, &t));
-    std::thread::sleep(Duration::from_millis(300)); // many polls
-    assert_eq!(state(&s, &t), "blocked", "the job that ended didn't say it");
-    touch(&s, "b");
-    wait_until("finished", || get(&s, &t)["state"] == "finished");
-    assert_eq!(get(&s, &t)["status"], Value::Null);
-}
-
-#[test]
 fn a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it() {
     for (i, recovery) in ["restart", "crash"].into_iter().enumerate() {
-        let s = polled();
+        let (s, t) = polled_shell();
         let gate = format!("a{i}");
-        let t = shell_running(&s, &[&format!("r state=blocked; w {gate}")]);
-        job_said(&s, &t, "blocked");
+        start_job(&s, &t, "job", &format!("r state=blocked; w {gate}"));
+        wait_until("blocked", || state(&s, &t) == "blocked" && job_in_front(&s, &t));
         let recover = || {
             if recovery == "restart" {
                 s.json(&["server", "restart"]);
@@ -298,21 +287,47 @@ fn a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it() {
 }
 
 #[test]
-fn a_crash_does_not_blame_a_new_job_for_an_old_ones_exit() {
-    let s = polled();
-    let t = shell_running(&s, &["r state=blocked; w a", "r state=blocked; w b"]);
-    job_said(&s, &t, "blocked");
-    std::thread::sleep(Duration::from_millis(2500)); // its name saved (within SAVE_SOON)
-    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap() as i32;
-    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
-    wait_until("core absent", || !s.connect_ok());
-    // While the core is down, the first job ends and the next says the same word.
-    touch(&s, "a");
-    touch(&s, "go1");
-    std::thread::sleep(Duration::from_millis(500));
-    wait_until("adopted, the next job in front", || job_in_front(&s, &t));
-    std::thread::sleep(Duration::from_millis(300)); // many polls
-    assert_eq!(state(&s, &t), "blocked", "the next job's word");
-    touch(&s, "b");
-    wait_until("reset when it ends", || get(&s, &t)["status"].is_null());
+fn a_crash_replay_does_not_bring_back_a_job_that_ended_at_its_shell() {
+    let (s, t) = polled_shell();
+    start_job(&s, &t, "job", "r state=working; w gate");
+    wait_until("working", || state(&s, &t) == "working" && job_in_front(&s, &t));
+    touch(&s, "gate");
+    wait_until("reset", || get(&s, &t)["status"].is_null());
+    wait_until("the reset on disk", || {
+        let r = saved(&s, &t);
+        r["status"].is_null() && r["turn"] == 1 && saved_at_its_shell(&r)
+    });
+    let before = get(&s, &t);
+    assert_eq!(before["turn"], 1, "{before}");
+    crash(&s);
+    // The holder's tail still holds the job's `working`.
+    let adopted = get(&s, &t);
+    assert_eq!((&adopted["state"], &adopted["status"]), (&Value::from("live"), &Value::Null), "{adopted}");
+    assert!(core_env_has(&s, "HC_FOREGROUND_MS=30"), "the new core polls every 30 ms");
+    std::thread::sleep(Duration::from_millis(500)); // many polls, the shell in front
+    let after = get(&s, &t);
+    assert_eq!((&after["status"], &after["turn"]), (&Value::Null, &before["turn"]), "one job, one turn: {after}");
+}
+
+#[test]
+fn a_job_started_after_the_shell_was_saved_adopts_with_its_status() {
+    // Polls far apart: the job reports, and the core dies, before any poll sees it.
+    let (s, t) = shell_polled_every("5000");
+    wait_until("the shell on disk", || saved_at_its_shell(&saved(&s, &t)));
+    // A sub-record changes no word, so it waits for the next save (2 s): only the tail has it.
+    start_job(&s, &t, "job", "r state=working:id=build; w gate");
+    wait_until("reported", || !get(&s, &t)["records"]["build"].is_null());
+    crash(&s);
+    let r = saved(&s, &t);
+    assert!(saved_at_its_shell(&r) && r["records"].is_null(), "saved with the shell in front and no report: {r}");
+    assert_eq!(get(&s, &t)["state"], "live", "adopted");
+    assert!(core_env_has(&s, "HC_FOREGROUND_MS=5000"));
+    // The tail waits for the new core's first poll, 5 s after it started.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(get(&s, &t)["records"].is_null(), "no poll yet, no replay yet");
+    wait_until("its report back once a poll sees the job", || !get(&s, &t)["records"]["build"].is_null());
+    let r = get(&s, &t);
+    assert_eq!((&r["records"]["build"]["state"], &r["turn"]), (&Value::from("working"), &Value::from(0)), "{r}");
+    assert!(job_in_front(&s, &t), "{r}");
+    touch(&s, "gate");
 }

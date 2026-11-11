@@ -1,8 +1,6 @@
 //! Status facts from OSC 7501, kept per terminal exactly as reported.
 //! A report replaces its record; `clear` removes a record and its children.
 //! The turn goes up each time the root record leaves `working`, for any reason.
-//! Facts last as long as the program that reported them: the terminal's own
-//! program, or a job its shell ran in the foreground.
 
 use crate::terminals::Terminal;
 use ghostty_vt::StatusReport;
@@ -101,7 +99,6 @@ pub fn apply(t: &mut Terminal, r: &StatusReport) -> Change {
     let (was_working, was_word) = (working(t), word(t));
     let was = stuck(t).map(String::from);
     t.reported = true;
-    t.reporter = None; // whoever is in front now, decided by `foreground_seen`
     if r.state == "clear" {
         if r.id.is_empty() {
             t.status = None;
@@ -135,36 +132,8 @@ pub fn reset(t: &mut Terminal) -> Change {
     let had = t.status.is_some() || !t.records.is_empty();
     t.status = None;
     t.records.clear();
-    t.reporter = None;
     stamp(t, was_word);
     Change { status: had, turn_ended: end_turn(t, was_working), ..Default::default() }
-}
-
-/// The terminal's foreground process group is `foreground` (polled). The
-/// first one seen after a report made it: the terminal's own program, or a job
-/// its shell runs. A job's facts reset once it is gone and something else is in
-/// front (its shell, usually), as if it were the program and had exited; the
-/// program's own facts last until it exits. `gone` asks the OS: a job that
-/// still runs, stopped or behind another, keeps its facts.
-pub fn foreground_seen(t: &mut Terminal, foreground: i32, gone: impl FnOnce(i32) -> bool) -> Option<Change> {
-    let program = t.pid.map(|p| p as i32)?;
-    if t.status.is_none() && t.records.is_empty() {
-        return None;
-    }
-    match *t.reporter.get_or_insert(foreground) {
-        job if job != program && job != foreground && gone(job) => {
-            let change = reset(t);
-            t.reporter = Some(job); // with no facts: they lapsed (see `lapsed`)
-            Some(change)
-        }
-        _ => None,
-    }
-}
-
-/// Its facts lapsed with the job that made them, and nothing was reported
-/// since. A crash replay's old reports must not bring them back.
-pub fn lapsed(t: &Terminal) -> bool {
-    t.status.is_none() && t.records.is_empty() && t.reporter.is_some()
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -257,35 +226,6 @@ mod tests {
         }
         apply(&mut t, &report("clear", "build"));
         assert_eq!(t.records.keys().collect::<Vec<_>>(), ["buildx", "deploy"]);
-    }
-
-    #[test]
-    fn a_job_that_reported_takes_its_facts_with_it() {
-        let mut t = terminal();
-        t.pid = Some(10);
-        let gone = |_| true;
-        assert_eq!(foreground_seen(&mut t, 20, gone), None, "nothing said");
-        apply(&mut t, &report("working", ""));
-        apply(&mut t, &report("blocked", "sub"));
-        assert_eq!(foreground_seen(&mut t, 20, |_| unreachable!()), None, "names the job in front");
-        assert_eq!(foreground_seen(&mut t, 20, |_| unreachable!()), None, "still in front: its child tools too");
-        assert_eq!(foreground_seen(&mut t, 10, |_| false), None, "stopped, the shell in front");
-        assert_eq!(foreground_seen(&mut t, 30, |_| false), None, "another job in front");
-        let change = foreground_seen(&mut t, 10, |job| job == 20).expect("it exited");
-        assert!(change.status && change.turn_ended);
-        assert!(t.status.is_none() && t.records.is_empty() && lapsed(&t));
-        assert_eq!(foreground_seen(&mut t, 30, gone), None, "nothing left");
-
-        apply(&mut t, &report("blocked", ""));
-        assert!(!lapsed(&t));
-        assert_eq!(foreground_seen(&mut t, 10, gone), None, "said by the program itself");
-        assert_eq!(foreground_seen(&mut t, 20, gone), None, "a later job did not say it");
-        assert_eq!(foreground_seen(&mut t, 10, gone), None, "only the program's exit resets it");
-        assert!(t.status.is_some());
-
-        apply(&mut t, &report("clear", ""));
-        assert_eq!(foreground_seen(&mut t, 20, gone), None, "cleared: nothing to reset");
-        assert_eq!(t.reporter, None);
     }
 
     #[test]
