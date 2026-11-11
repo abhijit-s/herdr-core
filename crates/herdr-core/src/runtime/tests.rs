@@ -198,6 +198,32 @@ fn a_blocked_registry_write_does_not_hold_the_core_lock() {
     assert!(returned && unlocked, "saving to a stalled disk must leave output and input free to take the core lock");
 }
 
+#[tokio::test]
+async fn a_prepared_restart_survives_sigterm_and_rejects_stop() {
+    let root = std::env::temp_dir().join(format!("hc-restart-stop-{}", platform::random_hex()));
+    let paths = Paths {
+        state: root.join("state"),
+        config: root.join("config.toml"),
+        socket: root.join("run/core.sock"),
+        holder_socket: root.join("run/core.holder.sock"),
+    };
+    paths.create_dirs().unwrap();
+    let core = Core::start(paths, CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
+    let call = crate::api::Call { core: &core, conn: None, plain: None };
+    crate::api::dispatch(&call, "server.restart", serde_json::json!({})).await.unwrap();
+    crate::restart::on_sigterm(&core);
+    assert!(core.paths.state.join("restart-env.json").exists(), "SIGTERM keeps the explicit restart's note");
+    let error = crate::api::dispatch(&call, "server.stop", serde_json::json!({})).await.unwrap_err();
+    assert_eq!(error.kind, "unavailable");
+    assert!(!core.lock().stopping, "a prepared handoff keeps its holders");
+    crate::restart::discard(&core.paths);
+    core.restart.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::api::dispatch(&call, "server.stop", serde_json::json!({})).await.unwrap();
+    assert!(crate::restart::prepare(&core, None).is_err(), "a stop already in progress wins");
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn host_shutdown_is_lost_without_overriding_explicit_actions() {
     for (killed, stopping, shutdown, expected) in [
@@ -234,6 +260,8 @@ fn a_new_holder_of_another_build_reports_both_identities() {
             instance: "other".into(),
             pid: 0,
             build: "other-build".into(),
+            login_session: None,
+            draining: false,
             previous: "none".into(),
             terminals: vec![],
         };
@@ -279,6 +307,8 @@ fn on_fake_holder(root: &std::path::Path, answers: &[&str]) -> (Arc<Core>, u32, 
         instance: "fake".into(),
         pid: 0,
         build: crate::client::build_id(),
+        login_session: None,
+        draining: false,
         previous: "crash".into(),
         terminals: vec![held],
     };
@@ -474,6 +504,8 @@ fn status_events_on_crash_adoption(tail: &[u8]) -> Vec<Value> {
         instance: "fake".into(),
         pid: 0,
         build: crate::client::build_id(),
+        login_session: None,
+        draining: false,
         previous: "crash".into(),
         terminals: vec![proto::HeldTerminal { id, pid: 1, cols: 80, rows: 24, exit: None }],
     };

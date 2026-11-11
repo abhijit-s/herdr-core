@@ -22,6 +22,7 @@ use persistence::RegistryWriter;
 
 pub struct Core {
     pub info: CoreInfo,
+    pub login_session: Option<platform::LoginSession>,
     pub started: Instant,
     pub stop: Notify,
     /// Set by `server.restart`: on stop, hand over instead of ending programs.
@@ -53,6 +54,7 @@ pub struct State {
     pub events: crate::events::Events,
     pub gates: HashMap<u32, crate::input::Gate>,
     pub queues: HashMap<u32, Arc<tokio::sync::Mutex<()>>>,
+    pub sends: HashMap<u32, Arc<tokio::sync::Mutex<()>>>,
     pub foreground: HashMap<u32, Vec<oneshot::Sender<i32>>>,
     /// Waits matching output: they get every byte viewers get.
     pub output_watch: HashMap<u32, Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
@@ -177,6 +179,7 @@ impl Core {
         let (jobs, jobs_rx) = tokio::sync::mpsc::unbounded_channel();
         let core = Arc::new(Core {
             info,
+            login_session: platform::login_session(),
             started: Instant::now(),
             stop: Notify::new(),
             restart: Default::default(),
@@ -313,8 +316,17 @@ impl Core {
             }
         }
         let mut st = self.lock();
-        let lost: Vec<u32> =
-            st.reg.terminals.values().filter(|t| t.is_live() && !adopted.contains(&t.id())).map(|t| t.id()).collect();
+        // Kept records already waiting for a shell retain why they stopped.
+        // A normal stop must not turn into crash cleanup on the next start.
+        // A replacement still claimed by a holder (holder set, no pid yet) is
+        // not waiting: if that holder is gone, it was lost like any other.
+        let lost: Vec<u32> = st
+            .reg
+            .terminals
+            .values()
+            .filter(|t| t.is_live() && !(t.program_lost() && t.holder.is_none()) && !adopted.contains(&t.id()))
+            .map(|t| t.id())
+            .collect();
         for id in lost {
             self.record_finish(&mut st, id, Exit { code: None, signal: None }, "stopped_by_restart");
         }
@@ -359,10 +371,22 @@ impl Core {
         drop(answered);
         let (bye, bye_rx) = mpsc::channel();
         let build = crate::client::build_id();
-        let current = welcome.build == build;
+        let current = platform::holder_current(
+            &welcome.build,
+            &build,
+            welcome.draining,
+            self.login_session,
+            welcome.login_session,
+        );
+        if welcome.build == build && self.login_session.is_some() && welcome.login_session.is_none() {
+            eprintln!("core: holder {} login identity unavailable; retaining build eligibility", welcome.pid);
+        }
         if require_current && !current {
             io::Write::write_all(&mut stream, &proto::frame(proto::DRAIN, 0, &[]))?;
-            return Err(io::Error::other(format!("holder build {} differs from core build {build}", welcome.build)));
+            return Err(io::Error::other(format!(
+                "holder build {} / login {:?} is not current for core build {build} / login {:?} (draining={})",
+                welcome.build, welcome.login_session, self.login_session, welcome.draining
+            )));
         }
         let (writer, frames) = mpsc::channel::<Vec<u8>>();
         let mut socket = stream.try_clone()?;
@@ -376,7 +400,7 @@ impl Core {
         let link =
             Link { writer, pid: welcome.pid, instance: welcome.instance.clone(), current, bye, bye_rx: Some(bye_rx) };
         if !current {
-            // Another build: it keeps what it runs, takes nothing new, exits when empty.
+            // Another build/login or already draining: retain its programs, take no new work.
             link.send(&proto::frame(proto::DRAIN, 0, &[]));
         }
         let (adopted, nudge) = {
@@ -425,6 +449,11 @@ impl Core {
                 continue;
             }
             adopted.push(id);
+            if let Some(saved) = st.reg.drafts.remove(&id)
+                && handover
+            {
+                st.gates.insert(id, crate::input::Gate::restore(saved));
+            }
             st.reg.terminals.get_mut(&id).expect("ours").holder = Some(instance.to_string());
             let tail = tails.remove(&id).unwrap_or_default();
             let saved = handover
@@ -467,24 +496,16 @@ impl Core {
             } else {
                 // A crash tail repeats reports we already counted: take its final word,
                 // but count at most the one turn that may have ended while we were down.
-                let (turn, was, since, reporter) =
-                    (rec.turn, rec.status.as_ref().map(|s| s.state.clone()), rec.status_ms, rec.reporter);
+                let (turn, was, since) = (rec.turn, rec.status.as_ref().map(|s| s.state.clone()), rec.status_ms);
                 let facts = |t: &crate::terminals::Terminal| (t.status.clone(), t.records.clone(), t.reported);
                 let heard = facts(rec);
-                // Facts that lapsed with their job stay gone: the tail still holds its reports.
-                let lapsed = crate::status::lapsed(rec);
-                for r in reports.iter().filter(|_| !lapsed) {
+                for r in &reports {
                     crate::status::apply(rec, r);
                 }
                 let now = rec.status.as_ref().map(|s| s.state.clone());
                 rec.turn = turn + (was.as_deref() == Some("working") && now.as_deref() != Some("working")) as u64;
                 if now == was {
                     rec.status_ms = since;
-                }
-                // The same word from a group still running: most likely the same facts from it.
-                // Another job may have said it after that group ended; then the next poll names it.
-                if now == was && reporter.is_some_and(|g| !crate::platform::group_gone(g)) {
-                    rec.reporter = reporter;
                 }
                 // Only a changed final word/turn proves new activity in a crash replay.
                 // A repeated done, or done -> idle, entirely during downtime can remain unobservable.
@@ -869,7 +890,7 @@ impl Core {
                         }
                     });
                     // The welcome may be unreadable (the reason relink failed).
-                    // Shutdown needs no inventory: the holder sweeps everything it owns.
+                    // Shutdown needs no inventory: the holder ends its own programs.
                     let hello = proto::json_frame(proto::HELLO, 0, &proto::Hello { version: proto::VERSION });
                     if io::Write::write_all(&mut stream, &hello).is_ok()
                         && io::Write::write_all(&mut stream, &proto::json_frame(proto::GOODBYE, 0, &mode)).is_ok()
@@ -881,13 +902,13 @@ impl Core {
             }
         }
         for rx in byes {
-            // A holder told to shut down first ends every leftover (up to ~3 s).
+            // A holder told to shut down ends any unacknowledged programs first.
             let _ = rx.recv_timeout(Duration::from_secs(6));
         }
     }
 
-    /// Ends what lost terminals left running, in the background but counted:
-    /// stop and restart wait for it.
+    /// Crash-only cleanup after losing a holder, never a normal terminal end.
+    /// Stop and restart wait for it. Tokens avoid signaling reused session IDs.
     fn sweep_in_background(&self, scopes: Vec<String>) {
         if scopes.is_empty() {
             return;
@@ -915,6 +936,12 @@ impl Core {
         {
             let mut st = self.lock();
             st.holders.clear();
+            st.reg.drafts = st
+                .gates
+                .iter()
+                .filter(|(id, _)| st.reg.terminals.get(*id).is_some_and(|t| t.is_live()))
+                .filter_map(|(id, gate)| Some((*id, gate.snapshot()?)))
+                .collect();
             let State { screens, relays, .. } = &mut *st;
             for (id, screen) in screens.iter_mut() {
                 if let Some(relay) = relays.get_mut(id) {
