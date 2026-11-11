@@ -57,9 +57,10 @@ pub struct State {
     pub sends: HashMap<u32, Arc<tokio::sync::Mutex<()>>>,
     pub foreground: HashMap<u32, Vec<oneshot::Sender<i32>>>,
     /// Crash tails adopted while the saved record had its root shell in front:
-    /// replayed at the first foreground poll unless the shell is still in front
-    /// (the job that reported has ended and was reset), dropped by a newer report.
-    pub crash_tails: HashMap<u32, Vec<ghostty_vt::StatusReport>>,
+    /// replayed at the first foreground poll that gets an answer unless the shell
+    /// is still in front (the job that reported has ended and was reset), dropped
+    /// by a newer report. With when they were adopted.
+    pub crash_tails: HashMap<u32, (Vec<ghostty_vt::StatusReport>, Instant)>,
     /// Waits matching output: they get every byte viewers get.
     pub output_watch: HashMap<u32, Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
     /// The turn of each caller's last send to a terminal, until a bare wait reports it.
@@ -523,7 +524,7 @@ impl Core {
             } else if crate::foreground::at_root_shell(rec.foreground.as_ref(), rec.pid) {
                 // Saved with its root shell in front: the tail may hold only an ended job's
                 // reports, already reset, or a job started since. The first poll tells.
-                st.crash_tails.insert(id, reports);
+                st.crash_tails.insert(id, (reports, Instant::now()));
             } else {
                 self.replay_crash_tail(st, id, &reports);
             }

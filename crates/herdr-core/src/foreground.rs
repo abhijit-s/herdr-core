@@ -162,6 +162,10 @@ pub(crate) fn at_root_shell(foreground: Option<&Foreground>, program: Option<u32
         && foreground.is_some_and(|f| Some(f.pid as u32) == program && shell_root(f))
 }
 
+/// How long a crash tail waits for the holder to say what is in front before
+/// it is replayed anyway.
+const CRASH_TAIL_WAIT: Duration = Duration::from_secs(3);
+
 impl Core {
     /// Keeps every live terminal's `foreground` current, with an event on each change.
     pub async fn watch_foreground(self: Arc<Self>) {
@@ -173,14 +177,16 @@ impl Core {
                 let pgid = self.foreground(id).await;
                 let now = (pgid > 0).then(|| about(pgid)).flatten();
                 let mut st = self.lock();
-                if let Some(reports) = st.crash_tails.remove(&id) {
+                if let Some((reports, since)) = st.crash_tails.remove(&id) {
                     let program = st.reg.terminals.get(&id).and_then(|t| t.pid);
-                    // Still the shell: its job ended, and was reset before the crash. If the
-                    // holder couldn't say (`now` unknown), replay as for any other crash.
-                    if !at_root_shell(now.as_ref(), program) {
+                    if now.is_none() && since.elapsed() < CRASH_TAIL_WAIT {
+                        // The holder couldn't say (busy after an adopt, or relinking): ask again.
+                        st.crash_tails.insert(id, (reports, since));
+                    } else if !at_root_shell(now.as_ref(), program) {
+                        // A job in front, or still no answer: replay as for any other crash.
                         self.replay_crash_tail(&mut st, id, &reports);
                         self.save_soon();
-                    }
+                    } // Still the shell: its job ended, and was reset before the crash.
                 }
                 let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live()) else {
                     continue;
