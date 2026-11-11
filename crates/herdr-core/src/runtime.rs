@@ -499,7 +499,10 @@ impl Core {
                 let (turn, was, since) = (rec.turn, rec.status.as_ref().map(|s| s.state.clone()), rec.status_ms);
                 let facts = |t: &crate::terminals::Terminal| (t.status.clone(), t.records.clone(), t.reported);
                 let heard = facts(rec);
-                for r in &reports {
+                // Saved with its root shell in front: the tail's reports are from jobs that
+                // have ended, already reset. Replayed, they would be reset and counted again.
+                let ended = crate::foreground::at_root_shell(rec.foreground.as_ref(), rec.pid);
+                for r in reports.iter().filter(|_| !ended) {
                     crate::status::apply(rec, r);
                 }
                 let now = rec.status.as_ref().map(|s| s.state.clone());

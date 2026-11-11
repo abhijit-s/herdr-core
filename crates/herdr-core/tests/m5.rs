@@ -251,3 +251,24 @@ fn a_jobs_status_survives_a_core_restart_or_crash_and_still_ends_with_it() {
         assert_eq!(get(&s, &t)["status"], Value::Null, "{recovery}: it stays reset");
     }
 }
+
+#[test]
+fn a_crash_replay_does_not_bring_back_a_job_that_ended_at_its_shell() {
+    let (s, t) = polled_shell();
+    start_job(&s, &t, "job", "r state=working; w gate");
+    wait_until("working", || state(&s, &t) == "working" && job_in_front(&s, &t));
+    touch(&s, "gate");
+    wait_until("reset", || get(&s, &t)["status"].is_null());
+    std::thread::sleep(Duration::from_millis(2600)); // past SAVE_SOON: the reset is on disk
+    let before = get(&s, &t);
+    assert_eq!(before["turn"], 1, "{before}");
+    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    wait_until("core absent", || !s.connect_ok());
+    // The holder's tail still holds the job's `working`.
+    let adopted = get(&s, &t);
+    assert_eq!((&adopted["state"], &adopted["status"]), (&Value::from("live"), &Value::Null), "{adopted}");
+    std::thread::sleep(Duration::from_millis(500)); // many polls, the shell in front
+    let after = get(&s, &t);
+    assert_eq!((&after["status"], &after["turn"]), (&Value::Null, &before["turn"]), "one job, one turn: {after}");
+}

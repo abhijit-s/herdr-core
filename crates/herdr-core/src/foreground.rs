@@ -155,6 +155,13 @@ fn shell_root(root: &Foreground) -> bool {
     matches!(name, "sh" | "bash" | "zsh" | "fish" | "nu" | "dash" | "ksh" | "tcsh")
 }
 
+/// The terminal's own program, an interactive shell, is in front: whatever
+/// job it ran has ended or stopped.
+pub(crate) fn at_root_shell(foreground: Option<&Foreground>, program: Option<u32>) -> bool {
+    crate::platform::foreground_tracks_jobs()
+        && foreground.is_some_and(|f| Some(f.pid as u32) == program && shell_root(f))
+}
+
 impl Core {
     /// Keeps every live terminal's `foreground` current, with an event on each change.
     pub async fn watch_foreground(self: Arc<Self>) {
@@ -169,10 +176,12 @@ impl Core {
                 let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live()) else {
                     continue;
                 };
-                let at_shell = crate::platform::foreground_tracks_jobs()
-                    && now.as_ref().is_some_and(|n| Some(n.pid as u32) == t.pid && shell_root(n));
+                // A launch task outlives the status of the agent given it (it may have
+                // cleared it); only a program that never reports, a plain shell, keeps
+                // its task until it ends.
+                let held = t.status.is_some() || !t.records.is_empty() || (t.reported && t.first_task_turn.is_some());
                 let mut task_pending = false;
-                let change = (at_shell && (t.status.is_some() || !t.records.is_empty())).then(|| {
+                let change = (held && at_root_shell(now.as_ref(), t.pid)).then(|| {
                     task_pending = t.first_task_turn.take().is_some();
                     crate::status::reset(t)
                 });
