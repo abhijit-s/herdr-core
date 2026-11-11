@@ -668,11 +668,28 @@ fn catch_wake() {
     });
 }
 
+/// Lets `WAKE` reach this thread whatever mask it inherited: blocked, it would
+/// stay pending and never end the call. Once per thread, so a read stays one
+/// syscall.
+fn accept_wake() {
+    thread_local!(static ACCEPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if ACCEPTED.replace(true) {
+        return;
+    }
+    unsafe {
+        let mut wake: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut wake);
+        libc::sigaddset(&mut wake, WAKE);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &wake, std::ptr::null_mut());
+    }
+}
+
 impl PtyIo {
     /// Runs `call` on the master unless the terminal is released. The thread is
     /// listed before it checks, so a release either is seen here or finds the
     /// thread listed and signals it until it leaves.
     fn interruptible<T>(&self, call: impl FnOnce(&File) -> io::Result<T>) -> Option<io::Result<T>> {
+        accept_wake();
         let me = unsafe { libc::pthread_self() } as usize;
         self.io.inside().push(me);
         let result = (!self.io.released.load(Ordering::Acquire)).then(|| call(&self.master));
@@ -976,12 +993,37 @@ mod pty_io_tests {
         true
     }
 
+    /// Reads one byte of input and writes what the read returned to `sys.argv[1]`.
+    const READ_INPUT: &str = "try:\n    got = repr(os.read(0, 1))\nexcept OSError as e:\n    got = \"errno %d\" % e.errno\n\
+                              open(sys.argv[1], \"w\").write(got)";
+
     #[test]
     fn a_release_ends_a_reader_and_hangs_up_a_terminal_its_program_made_exclusive() {
-        let marker = marker("excl-read");
-        let read_input = "try:\n    got = repr(os.read(0, 1))\nexcept OSError as e:\n    got = \"errno %d\" % e.errno\n\
-                          open(sys.argv[1], \"w\").write(got)";
-        let Some(script) = exclusive(&marker, read_input) else { return };
+        assert_release_hangs_up("excl-read");
+    }
+
+    /// Threads inherit their creator's signal mask: IO started from a thread that
+    /// blocks `WAKE` must still end on a release.
+    #[test]
+    fn a_release_ends_io_on_threads_that_inherited_a_blocked_wake() {
+        std::thread::spawn(|| {
+            unsafe {
+                let mut wake: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut wake);
+                libc::sigaddset(&mut wake, WAKE);
+                assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, &wake, std::ptr::null_mut()), 0);
+            }
+            assert_release_hangs_up("masked-read");
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// A release ends the reader of a detached program reading its exclusive
+    /// terminal, and the program's read then returns EOF or EIO.
+    fn assert_release_hangs_up(name: &str) {
+        let marker = marker(name);
+        let Some(script) = exclusive(&marker, READ_INPUT) else { return };
         let (_child, pty) = start(&script);
         let ended = drain(pty.reader().unwrap());
         assert!(wait_for(&marker.with_extension("ready")), "the program never made its terminal exclusive");
