@@ -173,6 +173,15 @@ impl Core {
                 let pgid = self.foreground(id).await;
                 let now = (pgid > 0).then(|| about(pgid)).flatten();
                 let mut st = self.lock();
+                if let Some(reports) = st.crash_tails.remove(&id) {
+                    let program = st.reg.terminals.get(&id).and_then(|t| t.pid);
+                    // Still the shell: its job ended, and was reset before the crash. If the
+                    // holder couldn't say (`now` unknown), replay as for any other crash.
+                    if !at_root_shell(now.as_ref(), program) {
+                        self.replay_crash_tail(&mut st, id, &reports);
+                        self.save_soon();
+                    }
+                }
                 let Some(t) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live()) else {
                     continue;
                 };

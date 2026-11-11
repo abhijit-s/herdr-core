@@ -56,6 +56,10 @@ pub struct State {
     pub queues: HashMap<u32, Arc<tokio::sync::Mutex<()>>>,
     pub sends: HashMap<u32, Arc<tokio::sync::Mutex<()>>>,
     pub foreground: HashMap<u32, Vec<oneshot::Sender<i32>>>,
+    /// Crash tails adopted while the saved record had its root shell in front:
+    /// replayed at the first foreground poll unless the shell is still in front
+    /// (the job that reported has ended and was reset), dropped by a newer report.
+    pub crash_tails: HashMap<u32, Vec<ghostty_vt::StatusReport>>,
     /// Waits matching output: they get every byte viewers get.
     pub output_watch: HashMap<u32, Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
     /// The turn of each caller's last send to a terminal, until a bare wait reports it.
@@ -421,6 +425,29 @@ impl Core {
         Ok(adopted)
     }
 
+    /// A crash tail repeats reports we already counted: take its final word,
+    /// but count at most the one turn that may have ended while we were down.
+    pub(crate) fn replay_crash_tail(&self, st: &mut State, id: u32, reports: &[ghostty_vt::StatusReport]) {
+        let Some(rec) = st.reg.terminals.get_mut(&id).filter(|t| t.is_live()) else { return };
+        let (turn, was, since) = (rec.turn, rec.status.as_ref().map(|s| s.state.clone()), rec.status_ms);
+        let facts = |t: &crate::terminals::Terminal| (t.status.clone(), t.records.clone(), t.reported);
+        let heard = facts(rec);
+        for r in reports {
+            crate::status::apply(rec, r);
+        }
+        let now = rec.status.as_ref().map(|s| s.state.clone());
+        rec.turn = turn + (was.as_deref() == Some("working") && now.as_deref() != Some("working")) as u64;
+        if now == was {
+            rec.status_ms = since;
+        }
+        // Only a changed final word/turn proves new activity in a crash replay.
+        // A repeated done, or done -> idle, entirely during downtime can remain unobservable.
+        let root_report = rec.turn != turn || now != was;
+        // Subscribers hear the final facts once, and only if the replay changed them.
+        let status = facts(rec) != heard;
+        self.status_changed(st, id, crate::status::Change { status, root_report, ..Default::default() });
+    }
+
     /// Matches saved records with what one holder runs. Returns the adopted ids,
     /// and the terminals whose screens were rebuilt from the tail and need
     /// their program to redraw.
@@ -493,29 +520,12 @@ impl Core {
                     let change = crate::status::apply(rec, r);
                     self.status_changed(st, id, change);
                 }
+            } else if crate::foreground::at_root_shell(rec.foreground.as_ref(), rec.pid) {
+                // Saved with its root shell in front: the tail may hold only an ended job's
+                // reports, already reset, or a job started since. The first poll tells.
+                st.crash_tails.insert(id, reports);
             } else {
-                // A crash tail repeats reports we already counted: take its final word,
-                // but count at most the one turn that may have ended while we were down.
-                let (turn, was, since) = (rec.turn, rec.status.as_ref().map(|s| s.state.clone()), rec.status_ms);
-                let facts = |t: &crate::terminals::Terminal| (t.status.clone(), t.records.clone(), t.reported);
-                let heard = facts(rec);
-                // Saved with its root shell in front: the tail's reports are from jobs that
-                // have ended, already reset. Replayed, they would be reset and counted again.
-                let ended = crate::foreground::at_root_shell(rec.foreground.as_ref(), rec.pid);
-                for r in reports.iter().filter(|_| !ended) {
-                    crate::status::apply(rec, r);
-                }
-                let now = rec.status.as_ref().map(|s| s.state.clone());
-                rec.turn = turn + (was.as_deref() == Some("working") && now.as_deref() != Some("working")) as u64;
-                if now == was {
-                    rec.status_ms = since;
-                }
-                // Only a changed final word/turn proves new activity in a crash replay.
-                // A repeated done, or done -> idle, entirely during downtime can remain unobservable.
-                let root_report = rec.turn != turn || now != was;
-                // Subscribers hear the final facts once, and only if the replay changed them.
-                let status = facts(rec) != heard;
-                self.status_changed(st, id, crate::status::Change { status, root_report, ..Default::default() });
+                self.replay_crash_tail(st, id, &reports);
             }
             if spawning {
                 self.spawn_result(st, instance, id, Ok(h.pid));
@@ -738,6 +748,7 @@ impl Core {
         } else {
             reason
         };
+        st.crash_tails.remove(&id);
         if let Some(t) = st.reg.terminals.get_mut(&id) {
             t.first_task_turn = None;
             let change = crate::status::reset(t);

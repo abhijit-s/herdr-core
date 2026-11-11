@@ -185,11 +185,45 @@ fn a_send_that_did_not_start_work_is_never_reported_finished() {
 
 /// An interactive shell, polled often, that runs each fake agent when sent.
 fn polled_shell() -> (Session, String) {
+    shell_polled_every("30")
+}
+
+fn shell_polled_every(ms: &str) -> (Session, String) {
     let mut s = session();
-    s.env.push(("HC_FOREGROUND_MS".into(), "30".into()));
+    s.env.push(("HC_FOREGROUND_MS".into(), ms.into()));
     let t = run(&s, &["sh", "-m"]);
     wait_until("the shell in front", || !get(&s, &t)["foreground"].is_null());
     (s, t)
+}
+
+/// The terminal's record as the core last saved it.
+fn saved(s: &Session, t: &str) -> Value {
+    let file = std::fs::read(s.root.join("state/herdr-core/test/terminals.json")).unwrap_or_default();
+    let state: Value = serde_json::from_slice(&file).unwrap_or_default();
+    state["terminals"][t.trim_start_matches('t')].clone()
+}
+
+fn saved_at_its_shell(r: &Value) -> bool {
+    r["foreground"]["pid"].as_i64().is_some_and(|p| Some(p) == r["pid"].as_i64())
+}
+
+/// Kills the core; the next command starts another, which adopts the holder.
+fn crash(s: &Session) {
+    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap() as i32;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    wait_until("core absent", || !s.connect_ok());
+}
+
+/// Whether the running core was started with `var` in its environment. Linux
+/// only: a macOS core started through launchd gets its environment over a
+/// socket, which `ps` doesn't show (a_job_started_after_the_shell_was_saved…
+/// checks the interval there by its timing).
+fn core_env_has(s: &Session, var: &str) -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap();
+    std::fs::read(format!("/proc/{pid}/environ")).unwrap().split(|b| *b == 0).any(|v| v == var.as_bytes())
 }
 
 /// Types `sh <job>` at the shell's prompt; `body` is the fake agent.
@@ -259,16 +293,41 @@ fn a_crash_replay_does_not_bring_back_a_job_that_ended_at_its_shell() {
     wait_until("working", || state(&s, &t) == "working" && job_in_front(&s, &t));
     touch(&s, "gate");
     wait_until("reset", || get(&s, &t)["status"].is_null());
-    std::thread::sleep(Duration::from_millis(2600)); // past SAVE_SOON: the reset is on disk
+    wait_until("the reset on disk", || {
+        let r = saved(&s, &t);
+        r["status"].is_null() && r["turn"] == 1 && saved_at_its_shell(&r)
+    });
     let before = get(&s, &t);
     assert_eq!(before["turn"], 1, "{before}");
-    let pid = s.json(&["server", "status"])["pid"].as_i64().unwrap() as i32;
-    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
-    wait_until("core absent", || !s.connect_ok());
+    crash(&s);
     // The holder's tail still holds the job's `working`.
     let adopted = get(&s, &t);
     assert_eq!((&adopted["state"], &adopted["status"]), (&Value::from("live"), &Value::Null), "{adopted}");
+    assert!(core_env_has(&s, "HC_FOREGROUND_MS=30"), "the new core polls every 30 ms");
     std::thread::sleep(Duration::from_millis(500)); // many polls, the shell in front
     let after = get(&s, &t);
     assert_eq!((&after["status"], &after["turn"]), (&Value::Null, &before["turn"]), "one job, one turn: {after}");
+}
+
+#[test]
+fn a_job_started_after_the_shell_was_saved_adopts_with_its_status() {
+    // Polls far apart: the job reports, and the core dies, before any poll sees it.
+    let (s, t) = shell_polled_every("5000");
+    wait_until("the shell on disk", || saved_at_its_shell(&saved(&s, &t)));
+    // A sub-record changes no word, so it waits for the next save (2 s): only the tail has it.
+    start_job(&s, &t, "job", "r state=working:id=build; w gate");
+    wait_until("reported", || !get(&s, &t)["records"]["build"].is_null());
+    crash(&s);
+    let r = saved(&s, &t);
+    assert!(saved_at_its_shell(&r) && r["records"].is_null(), "saved with the shell in front and no report: {r}");
+    assert_eq!(get(&s, &t)["state"], "live", "adopted");
+    assert!(core_env_has(&s, "HC_FOREGROUND_MS=5000"));
+    // The tail waits for the new core's first poll, 5 s after it started.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(get(&s, &t)["records"].is_null(), "no poll yet, no replay yet");
+    wait_until("its report back once a poll sees the job", || !get(&s, &t)["records"]["build"].is_null());
+    let r = get(&s, &t);
+    assert_eq!((&r["records"]["build"]["state"], &r["turn"]), (&Value::from("working"), &Value::from(0)), "{r}");
+    assert!(job_in_front(&s, &t), "{r}");
+    touch(&s, "gate");
 }
