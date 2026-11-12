@@ -198,6 +198,9 @@ On Windows, `--via` is a program and its arguments (CommandLineToArgvW split,
 no shell), with the remote line appended as one argument, no console window;
 Unix stays an sh line. For WSL: `hc machine add --via 'wsl.exe -d Ubuntu -e sh -c' --name wsl`.
 
+A machine whose SSH login fails shows `needs_login` and retries slowly (up to
+every 10 minutes); `hc machine login <name>` in a terminal reconnects now.
+
 On Windows, `hc server status` never starts a core. If elevated SSH startup
 would block the same user's desktop session, open Herdr on that Windows
 machine or run `hc server start` in a normal desktop terminal, then reconnect.
@@ -262,7 +265,13 @@ paths start at your current folder. Prefer explicit paths for remote work.
   every OS, including after a host shutdown. On macOS, shutdown warnings
   preserve kept programs even if they catch a signal and exit with a code;
   on Linux, systemd stops the core before its holders. Ordinary exits and
-  explicit kills remain final. Streams end on loss; reattach after the
+  explicit kills remain final. Set `restore_screen = true` in
+  `~/.config/herdr-core/config.toml` (Windows: `%APPDATA%\herdr-core\config.toml`)
+  to show the lost program's last saved screen above the new shell, separated
+  by a divider. It defaults to false and applies at the next recovery. On Windows,
+  the old screen is in history. `hc read` includes restored text, so scripts
+  reading it can match old output. Saved screens are consumed or discarded once; a power cut
+  that saves nothing starts blank. Streams end on loss; reattach after the
   restarted event. Pending input/attach may be unavailable: retry after recovery.
 - Once work is accepted: `hc kill <t>`, then `hc rm <t>`. Only clean up
   terminals you started; `hc ls` includes your user's other live work.
