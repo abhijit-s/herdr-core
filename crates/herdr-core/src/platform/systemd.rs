@@ -91,6 +91,7 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
     for (k, v) in cmd.get_envs() {
         let Some(k) = k.to_str() else { continue };
         match v.and_then(OsStr::to_str) {
+            Some(v) if core && !command_var_reaches_core(k, v, std::env::var(k).ok().as_deref()) => None,
             Some(v) => caller.insert(k.into(), v.into()),
             None => {
                 unset.push(k);
@@ -222,13 +223,23 @@ fn write_environment(run: &Path, name: &str, env: &BTreeMap<String, String>) -> 
 }
 
 /// What a service takes from the process starting it. A core's base is the
-/// user manager's environment, plus hc's settings and the login session's
-/// variables (see SESSION). A holder is started by its core and takes the core's.
+/// user manager's environment, plus hc's settings, the login session's
+/// variables (see SESSION) and what an ssh login's profile changed
+/// (`command_var_reaches_core`). A holder is started by its core and takes the core's.
 /// The ssh markers stay so `service_env` can tell an ssh login, then drops them.
 fn starter_env(vars: impl Iterator<Item = (String, String)>, core: bool) -> BTreeMap<String, String> {
-    let wanted =
-        |k: &str| super::starter_setting(OsStr::new(k)) || SESSION.contains(&k) || super::SSH_LOGIN.contains(&k);
-    vars.filter(|(k, _)| !core || wanted(k)).collect()
+    vars.filter(|(k, _)| !core || starter_key(k)).collect()
+}
+
+fn starter_key(k: &str) -> bool {
+    super::starter_setting(OsStr::new(k)) || SESSION.contains(&k) || super::SSH_LOGIN.contains(&k)
+}
+
+/// Whether a variable set on the start command reaches a core: a login
+/// environment captured over ssh (`linux_login`) repeats the caller's, and a
+/// core leaves those to the user manager, keeping only what the login changed.
+fn command_var_reaches_core(k: &str, v: &str, caller: Option<&str>) -> bool {
+    starter_key(k) || caller != Some(v)
 }
 
 /// The caller's environment as a service gets it: no ssh login's session, no
@@ -712,6 +723,17 @@ mod tests {
             ["HC_HEARTBEAT_MS", "HC_SESSION", "XDG_STATE_HOME"],
             "no ssh login's display"
         );
+    }
+
+    #[test]
+    fn a_core_takes_only_what_an_ssh_logins_profile_changed() {
+        let reaches = super::command_var_reaches_core;
+        assert!(!reaches("CLAUDE_CODE_CHILD_SESSION", "1", Some("1")), "the caller's own stays out");
+        assert!(!reaches("PATH", "/usr/bin", Some("/usr/bin")));
+        assert!(reaches("PATH", "/home/u/.local/bin:/usr/bin", Some("/usr/bin")), "the profile's PATH");
+        assert!(reaches("GOPATH", "/home/u/go", None), "a profile's export");
+        assert!(reaches("HC_SESSION", "dev", Some("dev")), "hc's settings always");
+        assert!(reaches("XDG_RUNTIME_DIR", "/run/user/1000", Some("/run/user/1000")));
     }
 
     #[test]
