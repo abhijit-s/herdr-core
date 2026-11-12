@@ -178,7 +178,18 @@ Use the returned address to wait/read it; don't launch a duplicate.
 ## Other machines and files
 
 Your harness's own file tools touch only the machine you run on. Use hc for
-remote files and commands. `hc machine ls` lists configured machines; see
+remote files and commands. On Linux with systemd, hc tries to enable lingering.
+If denied and logind has a finite stop delay, machine add warns and machine ls
+marks `! stops at logout`: programs end when the account's last login closes.
+An infinite or unreadable delay reports unknown. Run the suggested
+`sudo loginctl enable-linger -- <user>` on
+that machine once; the warning clears after the next background check and status
+refresh. The core checks at startup, after its own enable attempt, and about
+every minute. Until the first check finishes, the result is unknown.
+JSON carries `keeps_running_after_logout` (true, false, or null when unknown /
+not applicable) and `logout_linger_user`, also in hello and server.status.
+
+`hc machine ls` lists configured machines; see
 `hc machine --help` to configure SSH or `--via <cmd>` connections.
 Without `--name`, SSH machines use the first host label (IPs stay whole),
 shortened to 32 characters with `-2`, `-3`, etc. added if the name is taken
@@ -222,6 +233,14 @@ paths start at your current folder. Prefer explicit paths for remote work.
 - `blocked` means a person is needed (permission or a question): read the
   screen and ask your user. `send` refuses unless `--force`; don't use it to
   bypass a permission decision. `error`: read why, then send or kill.
+- A new Linux core started over SSH loads the account shell's non-interactive
+  login environment once, so remote terminals and commands can find programs
+  from login PATH settings. Local Linux starts, macOS and Windows are unchanged.
+  Reconnecting and crash recovery keep the loaded environment. Profiles have five
+  seconds and a combined 1 MiB output limit; remaining profile jobs are ended after
+  capture. A failed or blocked profile falls back to the incoming environment and records
+  the shell and reason in `core.log`. To refresh an existing remote core, run
+  `hc server restart --fresh` from a normal SSH login outside Herdr.
 - `hc run` without a command starts this machine's own shell. On macOS,
   this is a login shell so it loads the login environment; explicit commands
   are unchanged. Recovery shells use the same rule.
