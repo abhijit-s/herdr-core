@@ -1027,17 +1027,10 @@ pub fn spawn_pty(
     }
 }
 
+/// The holder doesn't gather reads here (see `holder::GATHERS`), so it never asks.
 impl super::PtyOutput for File {
-    fn read_now(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        let mut ready = 0u32;
-        let peeked =
-            unsafe { PeekNamedPipe(self.as_raw_handle() as HANDLE, null_mut(), 0, null_mut(), &mut ready, null_mut()) };
-        check(peeked)?;
-        if ready == 0 {
-            return Ok(None);
-        }
-        let n = buf.len().min(ready as usize);
-        self.read(&mut buf[..n]).map(Some)
+    fn read_now(&mut self, _buf: &mut [u8]) -> io::Result<Option<usize>> {
+        Ok(None)
     }
 }
 

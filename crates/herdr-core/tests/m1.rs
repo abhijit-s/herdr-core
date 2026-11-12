@@ -578,20 +578,29 @@ fn a_burst_of_tiny_writes_arrives_gathered_and_whole() {
     assert!(frames * 10 < writes, "{frames} frames for {writes} writes");
 }
 
-/// Releasing a terminal in the middle of a burst ends its output; the holder carries on.
+/// Releasing a terminal in the middle of a burst of tiny writes ends its
+/// output at once (nothing of it follows the next spawn's reply); the holder
+/// carries on.
 #[test]
 fn releasing_a_terminal_mid_burst_stops_it_cleanly() {
     let s = Session::new();
     let (_holder, socket) = raw_holder(&s, "release");
     let (mut core, _) = raw_hello(&socket);
-    raw_spawn(&mut core, 1, &["yes"]);
-    while proto::read(&mut core).unwrap().unwrap().0 != proto::OUTPUT {}
+    raw_spawn(&mut core, 1, &[python3(), "-c", "import os\nwhile True: os.write(1, b'y')"]);
+    let mut outputs = 0;
+    while outputs < 20 {
+        if proto::read(&mut core).unwrap().unwrap().0 == proto::OUTPUT {
+            outputs += 1;
+        }
+    }
     raw_send(&mut core, proto::frame(proto::RELEASE, 1, &[]));
     raw_spawn(&mut core, 2, &["printf", "after"]);
-    let mut printed = Vec::new();
+    let (mut printed, mut spawned) = (Vec::new(), false);
     loop {
         let (kind, id, payload) = proto::read(&mut core).expect("the next terminal's output").unwrap();
         match (kind, id) {
+            (proto::SPAWNED, 2) => spawned = true,
+            (proto::OUTPUT, 1) => assert!(!spawned, "output of a released terminal after the release"),
             (proto::OUTPUT, 2) => printed.extend(payload),
             (proto::EXITED, 2) => break,
             (proto::EXITED, 1) => panic!("a released terminal reports nothing"),

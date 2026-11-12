@@ -21,15 +21,18 @@ const FRAME_BYTES: usize = 64 << 10;
 
 // A program that writes in tiny pieces (`yes`, `seq`, a busy log) would cost a
 // wakeup, a read and a frame per piece in the holder, the core and every viewer.
-// So a small read that follows another closely waits a moment and takes what
-// arrived meanwhile, in one frame. An isolated write (an echoed keystroke, a
-// prompt) never waits.
-/// A read this soon after the last one is part of a burst.
+// So a small read that follows another small one closely waits a moment and
+// takes what arrived meanwhile, in one frame. A write after a quiet spell or
+// after a big read (an echoed keystroke, a prompt) never waits.
+/// Not on Windows: ConPTY already batches its output, and a sub-millisecond
+/// sleep there may last a timer tick (15.6 ms).
+const GATHERS: bool = cfg!(unix);
+/// A small read this soon after the last small one is part of a burst.
 const BURST_GAP: Duration = Duration::from_millis(1);
 /// The longest a burst waits: short enough not to be seen, long enough to
-/// gather a few hundred bytes from a fast writer. Below poll's 1 ms (its unit
-/// on macOS), so it sleeps instead. macOS oversleeps (250 µs asked: 330 µs
-/// median, 560 µs p95), hence 200.
+/// gather a few hundred bytes from a fast writer. Sub-millisecond, which
+/// poll can't time (and macOS has no ppoll), so it sleeps. macOS oversleeps
+/// (250 µs asked: 330 µs median, 560 µs p95), hence 200.
 const GATHER_WAIT: Duration = Duration::from_micros(200);
 /// The shortest; below it waiting saves little.
 const GATHER_WAIT_MIN: Duration = Duration::from_micros(16);
@@ -103,7 +106,8 @@ impl Gather {
     /// What one read returns; in a burst, also what arrives during the wait.
     fn read(&mut self, reader: &mut impl platform::PtyOutput, buf: &mut [u8]) -> io::Result<usize> {
         let mut n = reader.read(buf)?;
-        if n > 0 && n < SMALL_READ && self.last.is_some_and(|t| t.elapsed() < BURST_GAP) {
+        let small = GATHERS && n > 0 && n < SMALL_READ;
+        if small && self.last.is_some_and(|t| t.elapsed() < BURST_GAP) {
             std::thread::sleep(self.wait);
             let first = n;
             // An end or error is left for the next read, after these bytes went out.
@@ -113,12 +117,14 @@ impl Gather {
                     break;
                 }
             }
-            self.wait = match n - first >= SMALL_READ {
-                true => (self.wait / 2).max(GATHER_WAIT_MIN),
-                false => (self.wait * 2).min(GATHER_WAIT),
+            self.wait = if n - first >= SMALL_READ {
+                (self.wait / 2).max(GATHER_WAIT_MIN)
+            } else {
+                (self.wait * 2).min(GATHER_WAIT)
             };
         }
-        self.last = Some(Instant::now());
+        // Only small reads make a burst: what follows a big one (the prompt after a `cat`) goes at once.
+        self.last = small.then(Instant::now);
         Ok(n)
     }
 }
@@ -523,7 +529,7 @@ impl Holder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // GATHERS
 mod tests {
     use super::*;
     use std::io::Read;
@@ -598,11 +604,15 @@ mod tests {
         Gather { last: Some(Instant::now()), ..Gather::default() }
     }
 
-    /// Every frame until the end, each checked against the cap.
+    /// Every frame until the end, each checked against the cap. Each read is
+    /// in a burst whatever the clock says: a busy test machine may pause the
+    /// test between reads for longer than BURST_GAP.
     fn frames(gather: &mut Gather, script: &mut Script) -> Vec<Vec<u8>> {
         let mut buf = vec![0u8; FRAME_BYTES];
         let mut out = Vec::new();
-        while let Ok(n @ 1..) = gather.read(script, &mut buf) {
+        loop {
+            gather.last = Some(Instant::now());
+            let Ok(n @ 1..) = gather.read(script, &mut buf) else { break };
             assert!(n <= FRAME_BYTES);
             out.push(buf[..n].to_vec());
         }
@@ -667,18 +677,32 @@ mod tests {
 
     #[test]
     fn the_wait_shrinks_while_output_piles_up_and_grows_back() {
-        let mut gather = in_burst();
+        let mut gather = Gather::default();
         let mut buf = vec![0u8; FRAME_BYTES];
         for _ in 0..10 {
             let mut script = Script::new([Item::Data(b"a".to_vec()), Item::Data(vec![b'b'; 600])]);
+            gather.last = Some(Instant::now());
             gather.read(&mut script, &mut buf).unwrap();
         }
         assert_eq!(gather.wait, GATHER_WAIT_MIN);
         for _ in 0..10 {
             let mut script = Script::new([Item::Data(b"a".to_vec()), Item::Data(vec![b'b'; 10])]);
+            gather.last = Some(Instant::now());
             gather.read(&mut script, &mut buf).unwrap();
         }
         assert_eq!(gather.wait, GATHER_WAIT);
+    }
+
+    #[test]
+    fn a_small_write_right_after_a_big_read_goes_out_at_once() {
+        // The prompt after a `cat`, the cursor move after a full redraw.
+        let mut script =
+            Script::new([Item::Data(vec![b'x'; 4096]), Item::Data(b"$ ".to_vec()), Item::Data(b"more".to_vec())]);
+        let mut gather = in_burst();
+        let mut buf = vec![0u8; FRAME_BYTES];
+        assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 4096);
+        assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 2);
+        assert_eq!(script.read_nows, 0, "neither read waited for more");
     }
 
     #[test]
