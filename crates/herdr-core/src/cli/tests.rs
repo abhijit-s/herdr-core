@@ -146,3 +146,10 @@ fn labels_need_a_key() {
     let Cmd::Label(p) = parsed(&["label", "t1", "gone="]) else { panic!() };
     assert_eq!(to(&p)["labels"], json!({"gone": ""}), "an empty value removes it");
 }
+
+#[test]
+fn a_start_hands_over_the_shell_without_the_login_capture_mark() {
+    let vars = [("PATH", "/bin"), ("HC_LOGIN_CAPTURE", "1"), ("=C:", "C:\\"), ("HC_SESSION", "dev")];
+    let env = handed_over(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
+    assert_eq!(env.keys().collect::<Vec<_>>(), ["HC_SESSION", "PATH"]);
+}
