@@ -610,20 +610,26 @@ mod tests {
 
     #[test]
     fn a_lone_write_goes_out_without_waiting() {
-        let mut script = Script::new([Item::Data(b"x".to_vec()), Item::Data(b"later".to_vec())]);
-        let mut gather = Gather::default();
         let mut buf = vec![0u8; FRAME_BYTES];
-        let started = Instant::now();
-        assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 1);
-        assert!(started.elapsed() < GATHER_WAIT, "waited {:?}", started.elapsed());
-        assert_eq!(script.read_nows, 0, "an isolated write takes nothing after it");
+        // The fastest of several: a busy test machine may pause any one of them.
+        let mut fastest = Duration::MAX;
+        for _ in 0..20 {
+            let mut script = Script::new([Item::Data(b"x".to_vec()), Item::Data(b"more".to_vec())]);
+            let mut gather = Gather::default();
+            let started = Instant::now();
+            assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 1);
+            fastest = fastest.min(started.elapsed());
+            assert_eq!(script.read_nows, 0, "a first write takes nothing after it");
 
-        // A write after a quiet spell is isolated too.
-        gather.last = Instant::now().checked_sub(BURST_GAP * 2);
-        let started = Instant::now();
-        assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 5);
-        assert!(started.elapsed() < GATHER_WAIT, "waited {:?}", started.elapsed());
-        assert_eq!(script.read_nows, 0);
+            // A write after a quiet spell is isolated too.
+            let mut script = Script::new([Item::Data(b"y".to_vec()), Item::Data(b"more".to_vec())]);
+            gather.last = Instant::now().checked_sub(BURST_GAP * 2);
+            let started = Instant::now();
+            assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 1);
+            fastest = fastest.min(started.elapsed());
+            assert_eq!(script.read_nows, 0, "a write after a quiet spell takes nothing after it");
+        }
+        assert!(fastest < GATHER_WAIT / 10, "even the fastest took {fastest:?}");
     }
 
     #[test]
@@ -678,11 +684,13 @@ mod tests {
     fn the_end_of_output_still_sends_what_was_gathered() {
         for end in [Item::Eof, Item::Fail] {
             let fails = matches!(end, Item::Fail);
-            let mut script = Script::new([Item::Data(b"a".to_vec()), Item::Data(b"bcd".to_vec()), end]);
+            // Enough arrives that the gathering reads on into the end.
+            let mut script = Script::new([Item::Data(b"a".to_vec()), Item::Data(vec![b'b'; 600]), end]);
             let mut gather = in_burst();
             let mut buf = vec![0u8; FRAME_BYTES];
-            assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 4);
-            assert_eq!(&buf[..4], b"abcd");
+            assert_eq!(gather.read(&mut script, &mut buf).unwrap(), 601);
+            assert_eq!(&buf[..601], [b"a".as_slice(), &[b'b'; 600]].concat());
+            assert!(script.read_nows >= 2, "it reached the end");
             let next = gather.read(&mut script, &mut buf);
             assert!(if fails { next.is_err() } else { next.unwrap() == 0 }, "then the end itself");
         }
