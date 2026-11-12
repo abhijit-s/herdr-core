@@ -24,7 +24,7 @@ fn session() -> Session {
 /// Starts the fake app and waits until it has drawn.
 fn app(s: &Session, flags: &[&str]) -> String {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_tui.py");
-    let mut args = vec!["run", "--bg", "python3", script];
+    let mut args = vec!["run", "--bg", python3(), script];
     args.extend_from_slice(flags);
     let t = s.json(&args)["address"].as_str().unwrap().to_string();
     wait_until("app drawn", || s.json(&["read", &t])["text"].as_str().unwrap().contains("status"));

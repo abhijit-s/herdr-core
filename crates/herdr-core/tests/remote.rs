@@ -247,7 +247,7 @@ fn a_big_answer_on_a_slow_link_is_not_mistaken_for_a_frozen_machine() {
     // Everything rohan sends comes at ~320 KB/s; 2.2 s of silence is all a machine gets.
     let slow = s.root.join("slow-ssh");
     let throttle = "import sys, time\nwhile b := sys.stdin.buffer.read1(32768):\n    sys.stdout.buffer.write(b); sys.stdout.buffer.flush(); time.sleep(0.1)";
-    std::fs::write(&slow, format!("#!/bin/sh\n{fake} \"$@\" | python3 -c '{throttle}'\n")).unwrap();
+    std::fs::write(&slow, format!("#!/bin/sh\n{fake} \"$@\" | {} -c '{throttle}'\n", python3())).unwrap();
     std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     s.env.push((var, slow.display().to_string()));
     let config = s.root.join("config/herdr-core/config.toml");

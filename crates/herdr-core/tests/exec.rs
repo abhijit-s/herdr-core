@@ -22,9 +22,10 @@ fn table() -> Vec<u8> {
 fn stubborn(s: &Session, file: &str) -> String {
     let file = s.root.join(file).display().to_string();
     format!(
-        "python3 -c 'import os, signal, time; os.setsid(); signal.signal(signal.SIGHUP, signal.SIG_IGN); \
+        "{} -c 'import os, signal, time; os.setsid(); signal.signal(signal.SIGHUP, signal.SIG_IGN); \
          signal.signal(signal.SIGTERM, signal.SIG_IGN); open(\"{file}.tmp\", \"w\").write(str(os.getpid())); \
-         os.rename(\"{file}.tmp\", \"{file}\"); time.sleep(300)' & while [ ! -e {file} ]; do sleep 0.02; done;"
+         os.rename(\"{file}.tmp\", \"{file}\"); time.sleep(300)' & while [ ! -e {file} ]; do sleep 0.02; done;",
+        python3()
     )
 }
 

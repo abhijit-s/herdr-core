@@ -228,7 +228,7 @@ fn resource_limits_survive_launchd_except_the_raised_nofile_soft_limit() {
     }
     let out = s.hc(&[
         "exec",
-        "python3",
+        python3(),
         "-c",
         &format!("import resource,json; print(json.dumps([resource.getrlimit(i) for i in range({})]))", limits.len()),
     ]);
