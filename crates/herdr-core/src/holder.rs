@@ -28,8 +28,9 @@ const FRAME_BYTES: usize = 64 << 10;
 const BURST_GAP: Duration = Duration::from_millis(1);
 /// The longest a burst waits: short enough not to be seen, long enough to
 /// gather a few hundred bytes from a fast writer. Below poll's 1 ms (its unit
-/// on macOS), so it sleeps instead.
-const GATHER_WAIT: Duration = Duration::from_micros(250);
+/// on macOS), so it sleeps instead. macOS oversleeps (250 µs asked: 330 µs
+/// median, 560 µs p95), hence 200.
+const GATHER_WAIT: Duration = Duration::from_micros(200);
 /// The shortest; below it waiting saves little.
 const GATHER_WAIT_MIN: Duration = Duration::from_micros(16);
 /// A read at least this big found output piling up: no need to wait for more.
