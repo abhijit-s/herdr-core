@@ -26,6 +26,12 @@ mod macos_session;
 #[cfg(target_os = "macos")]
 mod macos_shutdown;
 
+/// A terminal's output, which can also be taken without waiting.
+pub trait PtyOutput: std::io::Read {
+    /// What has arrived so far, without waiting: `Ok(None)` when nothing has.
+    fn read_now(&mut self, buf: &mut [u8]) -> std::io::Result<Option<usize>>;
+}
+
 /// Whether foreground observations can distinguish a shell from its jobs.
 pub fn foreground_tracks_jobs() -> bool {
     cfg!(unix)
