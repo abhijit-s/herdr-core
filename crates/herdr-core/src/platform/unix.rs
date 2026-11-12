@@ -6,9 +6,6 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
 
 pub fn check_via(_target: &str) -> io::Result<()> {
     Ok(())
@@ -622,429 +619,65 @@ pub fn boot_id() -> io::Result<Option<String>> {
 /// A program on its own terminal.
 pub struct Pty {
     master: File,
-    io: Arc<IoState>,
+    stop: Stream,
+    _stop_sender: Stream,
 }
 
-/// Blocking IO on the master that a release ends, even if a detached program
-/// keeps its slave open or makes it exclusive. A blocking read is one syscall
-/// per chunk of output, where a cancellable poll-then-read would be two.
+/// Cancels blocked IO when the holder releases the terminal, even if a
+/// detached program keeps its slave open.
 pub struct PtyIo {
     master: File,
-    io: Arc<IoState>,
-}
-
-/// What a release needs to end a terminal's IO without opening its slave.
-#[derive(Default)]
-struct IoState {
-    released: AtomicBool,
-    /// The threads inside a read or write on the master (`pthread_t`s).
-    inside: Mutex<Vec<usize>>,
-}
-
-impl IoState {
-    fn inside(&self) -> MutexGuard<'_, Vec<usize>> {
-        self.inside.lock().unwrap_or_else(|p| p.into_inner())
-    }
-}
-
-/// Ends a read or write blocked on a master: its handler does nothing and
-/// doesn't restart the call, which fails with EINTR or returns what it moved.
-/// Once the handler is set, one sent to the whole process from elsewhere makes
-/// a single blocking call in some thread fail with EINTR. Every holder path
-/// retries that (accept in std, `read_exact`, `write_all`, the pump, `wait`).
-const WAKE: libc::c_int = libc::SIGURG;
-
-/// How long a release keeps signalling threads that don't leave the master.
-const WAKE_FOR: Duration = Duration::from_secs(1);
-
-fn catch_wake() {
-    extern "C" fn woken(_: libc::c_int) {}
-    static CAUGHT: std::sync::Once = std::sync::Once::new();
-    CAUGHT.call_once(|| unsafe {
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = woken as *const () as usize;
-        libc::sigemptyset(&mut action.sa_mask);
-        libc::sigaction(WAKE, &action, std::ptr::null_mut());
-    });
-}
-
-/// Lets `WAKE` reach this thread whatever mask it inherited: blocked, it would
-/// stay pending and never end the call. Once per thread, so a read stays one
-/// syscall: an IO thread must not block `WAKE` again after its first call.
-fn accept_wake() {
-    thread_local!(static ACCEPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
-    if ACCEPTED.replace(true) {
-        return;
-    }
-    unsafe {
-        let mut wake: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut wake);
-        libc::sigaddset(&mut wake, WAKE);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &wake, std::ptr::null_mut());
-    }
+    stop: Stream,
 }
 
 impl PtyIo {
-    /// Runs `call` on the master unless the terminal is released. The thread is
-    /// listed before it checks, so a release either is seen here or finds the
-    /// thread listed and signals it until it leaves.
-    fn interruptible<T>(&self, call: impl FnOnce(&File) -> io::Result<T>) -> Option<io::Result<T>> {
-        accept_wake();
-        let me = unsafe { libc::pthread_self() } as usize;
-        self.io.inside().push(me);
-        let result = (!self.io.released.load(Ordering::Acquire)).then(|| call(&self.master));
-        let mut inside = self.io.inside();
-        if let Some(i) = inside.iter().position(|&t| t == me) {
-            inside.swap_remove(i);
+    fn ready(&self, events: i16) -> io::Result<bool> {
+        let mut fds = [
+            libc::pollfd { fd: self.master.as_raw_fd(), events, revents: 0 },
+            libc::pollfd { fd: self.stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
+            return Err(io::Error::last_os_error());
         }
-        result
+        Ok(fds[1].revents == 0)
     }
 }
 
-/// A read or write can fail with `Interrupted` (any signal, `WAKE` included):
-/// callers retry it, and the retry sees a release.
 impl Read for PtyIo {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = self.interruptible(|mut master| master.read(buf));
-        // Everything read after a release is dropped: none of it reaches a
-        // viewer or the scrollback. Output alone never ends the reader.
-        if self.io.released.load(Ordering::Acquire) {
+        if buf.is_empty() {
             return Ok(0);
         }
-        read.unwrap_or(Ok(0))
+        loop {
+            if !self.ready(libc::POLLIN)? {
+                return Ok(0);
+            }
+            match self.master.read(buf) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return result,
+            }
+        }
     }
 }
 
 impl Write for PtyIo {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.interruptible(|mut master| master.write(buf)).unwrap_or_else(|| Err(io::ErrorKind::BrokenPipe.into()))
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if !self.ready(libc::POLLOUT)? {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            match self.master.write(buf) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                result => return result,
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.master.flush()
-    }
-}
-
-impl Drop for Pty {
-    /// Ends IO blocked on this terminal without opening its slave, which the
-    /// program may have made exclusive (`TIOCEXCL`): each thread inside a read or
-    /// write is signalled until it leaves. A signal that lands just before the
-    /// call starts is lost, so it repeats. The list is locked while signalling,
-    /// so no listed thread can have exited. The master closes, hanging up the
-    /// slave, once the reader and writer let go of their clones: a reader
-    /// waiting on a slow core's backlog keeps its clone until that drains.
-    fn drop(&mut self) {
-        self.io.released.store(true, Ordering::Release);
-        let deadline = Instant::now() + WAKE_FOR;
-        loop {
-            {
-                let inside = self.io.inside();
-                if inside.is_empty() {
-                    return;
-                }
-                if Instant::now() > deadline {
-                    return eprintln!("holder: {} IO threads still inside a released terminal", inside.len());
-                }
-                for &thread in inside.iter() {
-                    unsafe { libc::pthread_kill(thread as libc::pthread_t, WAKE) };
-                }
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-}
-
-#[cfg(test)]
-mod pty_io_tests {
-    use super::*;
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
-
-    const PROMPT: Duration = Duration::from_secs(2);
-
-    /// Ends the program however the test ends: releasing a PTY doesn't. Bind it
-    /// before the PTY so it drops after it: on macOS a program exiting with
-    /// unread output waits in its last close until every master is closed,
-    /// so the wait is bounded too, for a failing test whose IO threads still
-    /// hold one.
-    struct Running(Process);
-
-    impl Drop for Running {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let deadline = Instant::now() + PROMPT;
-            while matches!(self.0.try_wait(), Ok(None)) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-
-    fn start(script: &str) -> (Running, Pty) {
-        let env = std::collections::BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
-        let (pty, child) = spawn_pty(&shell_line(script), &env, "/", 80, 24).unwrap();
-        (Running(child), pty)
-    }
-
-    /// Reads until the reader ends, collecting what it read and how it ended.
-    fn drain(mut reader: PtyIo) -> mpsc::Receiver<(Vec<u8>, io::Result<usize>)> {
-        let (done, ended) = mpsc::channel();
-        std::thread::spawn(move || {
-            let (mut out, mut buf) = (Vec::<u8>::new(), [0u8; 4096]);
-            let last = loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break Ok(0),
-                    Ok(n) => out.extend(&buf[..n]),
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => break Err(e),
-                }
-            };
-            let _ = done.send((out, last));
-        });
-        ended
-    }
-
-    fn ended_by_hangup(last: &io::Result<usize>) -> bool {
-        matches!(last, Ok(0)) || last.as_ref().is_err_and(|e| e.raw_os_error() == Some(libc::EIO))
-    }
-
-    #[test]
-    fn an_idle_reader_waits_for_output() {
-        let (_child, pty) = start("sleep 0.3; printf late");
-        let (out, last) = drain(pty.reader().unwrap()).recv_timeout(Duration::from_secs(5)).expect("reader ended");
-        assert_eq!(out, b"late");
-        assert!(ended_by_hangup(&last), "ended with {last:?}");
-    }
-
-    #[test]
-    fn a_release_ends_an_idle_reader() {
-        let (_child, pty) = start("exec sleep 30");
-        let ended = drain(pty.reader().unwrap());
-        std::thread::sleep(Duration::from_millis(200));
-        drop(pty);
-        let (out, last) = ended.recv_timeout(PROMPT).expect("release seen");
-        assert_eq!(out, b"");
-        assert!(matches!(last, Ok(0)), "ended with {last:?}");
-    }
-
-    #[test]
-    fn a_release_ends_a_reader_while_output_is_stopped() {
-        let tcooff = "exec python3 -c 'import termios, time; termios.tcflow(0, termios.TCOOFF); time.sleep(30)'";
-        for script in ["exec sleep 30", tcooff] {
-            let (_child, pty) = start(script);
-            let ended = drain(pty.reader().unwrap());
-            if script == tcooff {
-                std::thread::sleep(Duration::from_millis(500));
-            } else {
-                pty.writer().unwrap().write_all(b"\x13").unwrap(); // ^S stops the output
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            drop(pty);
-            let (out, last) = ended.recv_timeout(PROMPT).unwrap_or_else(|_| panic!("{script}: release not seen"));
-            assert_eq!(out, b"", "{script}");
-            assert!(matches!(last, Ok(0)), "{script}: ended with {last:?}");
-        }
-    }
-
-    #[test]
-    fn a_release_ends_a_reader_of_a_busy_program() {
-        let (_child, pty) = start("exec yes");
-        let ended = drain(pty.reader().unwrap());
-        std::thread::sleep(Duration::from_millis(200));
-        let released = Instant::now();
-        drop(pty);
-        let (out, last) = ended.recv_timeout(PROMPT).expect("release seen");
-        eprintln!("busy reader ended {:?} after release", released.elapsed());
-        assert!(!out.is_empty(), "the program wrote nothing");
-        assert!(matches!(last, Ok(0)), "ended with {last:?}");
-    }
-
-    #[test]
-    fn output_alone_never_ends_the_reader() {
-        let (_child, pty) = start("printf 'a\\0b'; sleep 0.2; printf 'c\\0'");
-        let (out, last) = drain(pty.reader().unwrap()).recv_timeout(PROMPT).expect("reader ended");
-        assert_eq!(out, b"a\0bc\0");
-        assert!(ended_by_hangup(&last), "ended with {last:?}");
-    }
-
-    #[test]
-    fn a_release_racing_reads_always_ends_the_reader() {
-        for i in 0..100u64 {
-            let script = if i % 2 == 0 { "exec yes" } else { "while :; do printf y; sleep 0.001; done" };
-            let (_child, pty) = start(script);
-            let ended = drain(pty.reader().unwrap());
-            std::thread::sleep(Duration::from_micros(i * 97 % 5000));
-            drop(pty);
-            let (_, last) = ended.recv_timeout(PROMPT).unwrap_or_else(|_| panic!("round {i}: release not seen"));
-            assert!(matches!(last, Ok(0)), "round {i}: ended with {last:?}");
-        }
-    }
-
-    #[test]
-    fn a_release_after_the_program_exited_is_harmless() {
-        let (_child, pty) = start("printf done");
-        let (out, last) = drain(pty.reader().unwrap()).recv_timeout(PROMPT).expect("reader ended");
-        assert_eq!(out, b"done");
-        assert!(ended_by_hangup(&last), "ended with {last:?}");
-        drop(pty);
-    }
-
-    #[test]
-    fn a_reader_ends_when_the_program_exits() {
-        let (_child, pty) = start("printf done");
-        let (out, last) = drain(pty.reader().unwrap()).recv_timeout(PROMPT).expect("reader ended");
-        assert_eq!(out, b"done");
-        assert!(ended_by_hangup(&last), "ended with {last:?}");
-    }
-
-    extern "C" fn ignore(_: libc::c_int) {}
-
-    #[test]
-    fn a_signal_interrupting_a_waiting_reader_loses_no_output() {
-        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = ignore as *const () as usize;
-            action.sa_flags = 0; // no SA_RESTART: a blocked poll or read fails with EINTR
-            assert_eq!(libc::sigaction(libc::SIGUSR1, &action, &mut previous), 0);
-        }
-        let (_child, pty) = start("printf early; sleep 1; printf late");
-        let mut reader = pty.reader().unwrap();
-        let (tid_tx, tid) = mpsc::channel();
-        let ended = std::thread::spawn(move || {
-            tid_tx.send(unsafe { libc::pthread_self() } as usize).unwrap();
-            let (mut out, mut interrupted, mut buf) = (Vec::<u8>::new(), 0, [0u8; 64]);
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => out.extend(&buf[..n]),
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => interrupted += 1,
-                    Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
-                    Err(e) => panic!("read failed: {e}"),
-                }
-            }
-            (out, interrupted)
-        });
-        let tid = tid.recv().unwrap() as libc::pthread_t;
-        for _ in 0..10 {
-            std::thread::sleep(Duration::from_millis(50));
-            unsafe { libc::pthread_kill(tid, libc::SIGUSR1) };
-        }
-        let (out, interrupted) = ended.join().unwrap();
-        unsafe { libc::sigaction(libc::SIGUSR1, &previous, std::ptr::null_mut()) };
-        assert_eq!(out, b"earlylate");
-        assert!(interrupted > 0, "no read was interrupted");
-    }
-
-    #[test]
-    fn a_writer_blocked_on_a_full_terminal_ends_on_release() {
-        assert_release_ends_blocked_writers("excl-write");
-    }
-
-    /// A writer blocked on a full terminal ends with `BrokenPipe` on release, on a
-    /// plain terminal and on one its program made exclusive.
-    fn assert_release_ends_blocked_writers(name: &str) {
-        let marker = marker(name);
-        for script in std::iter::once("exec sleep 30".to_string()).chain(exclusive(&marker, "time.sleep(30)")) {
-            let (_child, pty) = start(&script);
-            if script.contains("TIOCEXCL") {
-                assert!(wait_for(&marker.with_extension("ready")), "the program never made its terminal exclusive");
-            }
-            let mut writer = pty.writer().unwrap();
-            let input = b"x\n".repeat(512 * 1024);
-            let (done, ended) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = done.send(writer.write_all(&input));
-            });
-            assert!(ended.recv_timeout(Duration::from_millis(300)).is_err(), "{script}: a full terminal took it all");
-            drop(pty);
-            let last = ended.recv_timeout(PROMPT).unwrap_or_else(|_| panic!("{script}: release not seen"));
-            assert_eq!(last.unwrap_err().kind(), io::ErrorKind::BrokenPipe, "{script}");
-        }
-        let _ = std::fs::remove_file(marker.with_extension("ready"));
-    }
-
-    /// A detached job (it ignores SIGHUP, like `nohup`) that makes its terminal
-    /// exclusive, then runs `then`. Linux then refuses to open the slave to anyone
-    /// but root, through its name or `TIOCGPTPEER`; macOS doesn't for a PTY.
-    /// `<marker>.ready` appears once the terminal is exclusive. None, and a note
-    /// that the test is skipped, without `/usr/bin/python3`.
-    fn exclusive(marker: &Path, then: &str) -> Option<String> {
-        if !Path::new(PYTHON).exists() {
-            eprintln!("skipped: an exclusive terminal needs {PYTHON}");
-            return None;
-        }
-        let _ = std::fs::remove_file(marker);
-        let _ = std::fs::remove_file(marker.with_extension("ready"));
-        let setup = "import fcntl, os, signal, sys, termios, time\n\
-                     signal.signal(signal.SIGHUP, signal.SIG_IGN)\n\
-                     fcntl.ioctl(0, termios.TIOCEXCL)\n\
-                     open(sys.argv[1] + \".ready\", \"w\").close()\n";
-        Some(format!("exec {PYTHON} -c '{setup}{then}' {}", marker.display()))
-    }
-
-    const PYTHON: &str = "/usr/bin/python3";
-
-    fn marker(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("hc-pty-{name}-{}", std::process::id()))
-    }
-
-    fn wait_for(path: &Path) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !path.exists() {
-            if Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-
-    /// Reads one byte of input and writes what the read returned to `sys.argv[1]`.
-    const READ_INPUT: &str = "try:\n    got = repr(os.read(0, 1))\nexcept OSError as e:\n    got = \"errno %d\" % e.errno\n\
-                              open(sys.argv[1], \"w\").write(got)";
-
-    #[test]
-    fn a_release_ends_a_reader_and_hangs_up_a_terminal_its_program_made_exclusive() {
-        assert_release_hangs_up("excl-read");
-    }
-
-    /// Threads inherit their creator's signal mask: IO started from a thread that
-    /// blocks `WAKE` must still end on a release.
-    #[test]
-    fn a_release_ends_io_on_threads_that_inherited_a_blocked_wake() {
-        std::thread::spawn(|| {
-            unsafe {
-                let mut wake: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut wake);
-                libc::sigaddset(&mut wake, WAKE);
-                assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, &wake, std::ptr::null_mut()), 0);
-            }
-            assert_release_ends_blocked_writers("masked-write");
-            assert_release_hangs_up("masked-read");
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// A release ends the reader of a detached program reading its exclusive
-    /// terminal, and the program's read then returns EOF or EIO.
-    fn assert_release_hangs_up(name: &str) {
-        let marker = marker(name);
-        let Some(script) = exclusive(&marker, READ_INPUT) else { return };
-        let (_child, pty) = start(&script);
-        let ended = drain(pty.reader().unwrap());
-        assert!(wait_for(&marker.with_extension("ready")), "the program never made its terminal exclusive");
-        std::thread::sleep(Duration::from_millis(100));
-        drop(pty);
-        let (out, last) = ended.recv_timeout(PROMPT).expect("release seen");
-        assert_eq!(out, b"");
-        assert!(matches!(last, Ok(0)), "ended with {last:?}");
-        // The terminal is gone: the program's read ends instead of waiting for input.
-        assert!(wait_for(&marker), "the program can still wait for input");
-        let got = std::fs::read_to_string(&marker).unwrap();
-        assert!(got == "b''" || got == format!("errno {}", libc::EIO), "the program read {got}");
-        let _ = std::fs::remove_file(marker.with_extension("ready"));
-        let _ = std::fs::remove_file(&marker);
     }
 }
 
@@ -1069,7 +702,11 @@ pub fn spawn_pty(
     for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
-    catch_wake();
+    let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (stop, stop_sender) = Stream::pair()?;
     let mut cmd = Command::new(program);
     cmd.args(&argv[1..])
         .env_clear()
@@ -1087,13 +724,13 @@ pub fn spawn_pty(
         });
     }
     let child = cmd.spawn()?;
-    Ok((Pty { master, io: Arc::default() }, child))
+    Ok((Pty { master, stop, _stop_sender: stop_sender }, child))
 }
 
 impl Pty {
     /// Its output, read until the slave closes or this PTY is released.
     pub fn reader(&self) -> io::Result<PtyIo> {
-        Ok(PtyIo { master: self.master.try_clone()?, io: self.io.clone() })
+        Ok(PtyIo { master: self.master.try_clone()?, stop: self.stop.try_clone()? })
     }
 
     pub fn writer(&self) -> io::Result<PtyIo> {

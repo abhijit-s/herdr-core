@@ -266,17 +266,12 @@ impl Holder {
                     self.to_core(&mut st, &proto::json_frame(proto::FOREGROUND_IS, id, &proto::Foreground { pgid }));
                 }
                 proto::RELEASE => {
-                    // Taken out of the state first: dropping it waits for its IO
-                    // threads to leave the terminal, which must not happen under the
-                    // state lock.
-                    let released = self.lock().terms.remove(&id);
-                    if let Some(t) = &released
+                    if let Some(t) = self.lock().terms.remove(&id)
                         && !t.reader_done
                     {
                         // Leftover background jobs still hold the PTY: hang them up.
                         t.pty.hang_up(t.pid);
                     }
-                    drop(released);
                     self.exit_if_drained();
                 }
                 proto::DRAIN => {
