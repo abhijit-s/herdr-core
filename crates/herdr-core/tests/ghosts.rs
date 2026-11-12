@@ -16,7 +16,8 @@ fn python(s: &Session, file: &str, own_session: bool, term: bool) -> String {
     let setsid = if own_session { "os.setsid(); " } else { "" };
     let ignore_term = if term { "signal.signal(signal.SIGTERM, signal.SIG_IGN); " } else { "" };
     format!(
-        "python3 -c 'import os, signal, time; {setsid}signal.signal(signal.SIGHUP, signal.SIG_IGN); {ignore_term}open(\"{}\", \"w\").write(str(os.getpid())); time.sleep(300)'",
+        "{} -c 'import os, signal, time; {setsid}signal.signal(signal.SIGHUP, signal.SIG_IGN); {ignore_term}open(\"{}\", \"w\").write(str(os.getpid())); time.sleep(300)'",
+        python3(),
         s.root.join(file).display()
     )
 }

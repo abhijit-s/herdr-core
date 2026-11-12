@@ -308,6 +308,22 @@ pub fn write_new_build(to: &std::path::Path) {
     std::fs::set_permissions(to, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 }
 
+/// The test runner's python3 interpreter, by its full path. A core a test starts
+/// on its own takes the service manager's PATH (launchd's, systemd's), where
+/// python3 may be a version manager's shim that fails with a session's HOME and
+/// XDG dirs; the interpreter itself, asked here with the runner's environment, works.
+pub fn python3() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let out = Command::new("python3")
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .expect("python3 on the test runner's PATH");
+        assert!(out.status.success(), "python3: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    })
+}
+
 pub fn wait_until(what: &str, ok: impl FnMut() -> bool) {
     wait_until_for(what, Duration::from_secs(10), ok);
 }
