@@ -50,6 +50,18 @@ Fork fixes on upstream's reset, all upstream candidates:
 - Tests: `holder::tests` (a lone write and a small write after a big read take nothing after them; a burst arrives in far fewer frames with the same bytes in order; the cap; the wait shrinking and growing back; an end or error after gathered bytes), `tests/m1.rs` `a_burst_of_tiny_writes_arrives_gathered_and_whole` (20000 five-byte writes: every byte in order before the exit, under a tenth as many frames), `releasing_a_terminal_mid_burst_stops_it_cleanly`.
 - Files: `crates/herdr-core/src/{holder.rs, platform/mod.rs, platform/unix.rs, platform/windows.rs}`, `crates/herdr-core/tests/m1.rs`
 
+### An autostarted core takes the service manager's environment
+
+`fix/autostart-service-env` (fork PR #7, fork only: upstream declined it as herdrdev/herdr-core #231, since tools only on the caller's PATH stop being found after an implicit start): a core that starts on its own (any `hc` command, `hc connect` from the app, a plugin, a holder restarting a crashed core) takes the service manager's environment plus hc's own settings (`platform::starter_setting`), not the starting client's. launchd's on macOS (`macos_launchd.rs` `Inherited::settings`), the systemd user manager's on Linux (`systemd.rs` `starter_env`), a new login's on Windows (`windows_env.rs` `service_base`). `hc server start` and `hc server restart --fresh` hand over the caller's environment; planned restarts keep the retiring core's. Without a service manager the core still takes the caller's.
+
+- Upstream's own fix for remote Linux cores (`df5474b`, `platform/linux_login.rs`) sits on top: a new core started over ssh on Linux captures the login shell's environment and sets it on the start command. On the systemd path `systemd::spawn` copies the command's variables over `starter_env`'s, so such a core takes that login environment rather than the user manager's alone. Local starts are unchanged.
+- Tests: `tests/environment.rs` (`a_core_a_command_starts_takes_launchds_environment_not_the_callers`, `a_core_the_app_connection_starts_takes_launchds_environment_not_the_callers`, `an_explicit_start_takes_the_callers_environment_and_restarts_keep_it`, `starting_a_running_core_leaves_its_environment_alone`), `macos_launchd::tests`, `systemd::tests::a_core_takes_the_managers_environment_but_a_holder_takes_its_cores`.
+- Files: `crates/herdr-core/src/{cli.rs, platform/mod.rs, platform/macos_launchd.rs, platform/systemd.rs, platform/windows.rs, platform/windows_env.rs}`, `crates/herdr-core/tests/environment.rs`, `README.md`, `crates/herdr-core/src/SKILL.md`, `docs/commands.md`
+
+### Test waits
+
+`fix/tests-launchd-env` and `fix/ssh-agent-test-env` (fork PRs #10 and #12, upstream PRs herdrdev/herdr-core #251 and #253, open): `tests/foreground.rs`'s exec'd-agent tests wait for the agent's first report before checking its status, and `platform::environment_tests::a_restart_refreshes_only_a_dead_saved_ssh_agent_socket` waits until the dead socket refuses connections. Tests run the runner's own `python3` by its full path (`tests/common/mod.rs` `python3()`).
+
 ## Not carried
 
 ### Blocking PTY reads with a signal wake (upstream #202)
@@ -61,6 +73,16 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 - Correctness: going back to poll gives up no behaviour. A release still ends the reader and writer of a terminal a detached program holds, through the stop socket (upstream's `tests/ghosts.rs` `closing_detached_terminals_releases_the_holders_pty_masters`, Linux only), and poll never opens the slave, so a terminal its program made exclusive (`TIOCEXCL`) is no special case. The stray-`SIGURG` `EINTR` rule and the drop outside the holder lock go with #202.
 
 ## Upstream syncs
+
+### 2026-11-12: `de97ea5..7edc5df` (`upstream/master`)
+
+Merged `upstream/master` (8 commits after 0.1.20) into the fork's `75a4c4f`.
+
+- `75874d6` (#228) is the fork's `fix/restart-clean-env` (fork PR #6), upstreamed: `just install` restarts the core through `scripts/restart-core.sh` with only the login's own variables. `scripts/`, `AGENTS.md` and `tests/environment.rs` merged identical to the fork's. `README.md` conflicted and keeps the fork's sentence, which adds the service manager rule above.
+- `df5474b` remote Linux cores load the login environment (`platform/linux_login.rs`, `platform::core_environment`, called from `client::spawn_detached`); see the service manager section for how it meets the fork's rule.
+- `7edc5df` warns when remote programs stop at logout (`platform::logout_linger`, systemd lingering). `platform/mod.rs` conflicted only by position: the fork's `PtyOutput` trait and upstream's `logout_linger`/`start_logout_linger` both stay.
+- `b00f8b9` (#229) starts the bash agent script in `tests/foreground.rs` through `bash`; it merged cleanly beside the fork's report waits.
+- Also: image query answers and DA1 (`f0828f1`, `1c22a51`), replaying the primary screen when attaching on the alternate screen (`e1b3810`), repeated `hc wait` no longer growing memory (`6a608d7`, #230).
 
 ### 0.1.20: `3965a46..de97ea5` (`v0.1.20`)
 
