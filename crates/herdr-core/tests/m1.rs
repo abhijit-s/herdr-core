@@ -578,9 +578,9 @@ fn a_burst_of_tiny_writes_arrives_gathered_and_whole() {
     assert!(frames * 10 < writes, "{frames} frames for {writes} writes");
 }
 
-/// Releasing a terminal in the middle of a burst of tiny writes ends its
-/// output at once (nothing of it follows the next spawn's reply); the holder
-/// carries on.
+/// Releasing a terminal while it gathers a burst of tiny writes leaves the
+/// holder serving others, and nothing of the released one follows the next
+/// spawn's reply.
 #[test]
 fn releasing_a_terminal_mid_burst_stops_it_cleanly() {
     let s = Session::new();

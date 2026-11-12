@@ -24,8 +24,7 @@ const FRAME_BYTES: usize = 64 << 10;
 // So a small read that follows another small one closely waits a moment and
 // takes what arrived meanwhile, in one frame. A write after a quiet spell or
 // after a big read (an echoed keystroke, a prompt) never waits.
-/// Not on Windows: ConPTY already batches its output, and a sub-millisecond
-/// sleep there may last a timer tick (15.6 ms).
+/// Not on Windows: ConPTY already batches its output, and the wait there is unmeasured.
 const GATHERS: bool = cfg!(unix);
 /// A small read this soon after the last small one is part of a burst.
 const BURST_GAP: Duration = Duration::from_millis(1);
