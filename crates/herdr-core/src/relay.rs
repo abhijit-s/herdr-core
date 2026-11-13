@@ -348,19 +348,27 @@ mod tests {
 
     #[test]
     fn a_restored_title_reaches_the_screen_and_viewers_as_an_osc_title() {
-        // Neovim with `title`: save, set its own, restore on exit.
-        let input = b"\x1b]0;shell\x07\x1b[22;0t\x1b]0;file.md - Nvim\x07text\x1b[23;0t$ ";
-        for split in [false, true] {
+        // Neovim with `title` under xterm-256color: smcup saves too, then its own
+        // save, its title, and on exit both restores. A shell may have set no title.
+        let open = b"\x1b[?1049h\x1b[22;0;0t\x1b[22;0t\x1b]0;file.md - Nvim\x07text";
+        let exit = b"\x1b[23;0t\x1b[?1049l\x1b[23;0;0t$ ";
+        for (before, split) in [("shell", false), ("shell", true), ("", false)] {
             let mut screen = Screen::new(80, 24, 1 << 20);
             let mut relay = Relay::default();
-            let out =
-                if split { feed_bytewise(&mut relay, &mut screen, input) } else { relay.feed(&mut screen, input) };
-            let mut want = input[..input.len() - 2].to_vec();
-            want.extend_from_slice(b"\x1b]2;shell\x1b\\$ ");
-            assert_eq!(String::from_utf8_lossy(&out), String::from_utf8_lossy(&want), "split={split}");
-            assert_eq!(screen.title(), "shell", "split={split}");
-            assert!(screen.take_title_changed());
-            assert!(screen.take_responses().is_empty());
+            let mut feed = |screen: &mut Screen, bytes: &[u8]| {
+                if split { feed_bytewise(&mut relay, screen, bytes) } else { relay.feed(screen, bytes) }
+            };
+            let set = format!("\x1b]0;{before}\x07");
+            feed(&mut screen, set.as_bytes());
+            assert_eq!(feed(&mut screen, open), open);
+            screen.take_title_changed();
+            let restore = format!("\x1b]2;{before}\x1b\\");
+            let want = [&b"\x1b[23;0t"[..], restore.as_bytes(), b"\x1b[?1049l\x1b[23;0;0t", restore.as_bytes(), b"$ "];
+            let out = feed(&mut screen, exit);
+            assert_eq!(String::from_utf8_lossy(&out), String::from_utf8_lossy(&want.concat()), "{before:?} {split}");
+            assert!(screen.take_title_changed(), "{before:?} {split}");
+            assert_eq!(screen.title(), before);
+            assert!(screen.title_stack().is_empty() && screen.take_responses().is_empty());
         }
     }
 

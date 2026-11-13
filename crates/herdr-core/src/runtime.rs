@@ -996,7 +996,9 @@ impl Core {
                 .filter_map(|(id, gate)| Some((*id, gate.snapshot()?)))
                 .collect();
             let State { screens, relays, reg, .. } = &mut *st;
-            reg.titles.clear();
+            // A terminal whose holder hasn't come back keeps its earlier snapshot, and with it its stack.
+            let crate::terminals::Registry { titles, terminals, .. } = reg;
+            titles.retain(|id, _| !screens.contains_key(id) && terminals.get(id).is_some_and(|t| t.is_live()));
             for (id, screen) in screens.iter_mut() {
                 if let Some(relay) = relays.get_mut(id) {
                     relay.flush(screen);
@@ -1004,7 +1006,7 @@ impl Core {
                 if let Some(snapshot) = screen.snapshot() {
                     let _ = write_atomic(&self.snapshot_path(*id), &snapshot);
                     if !screen.title_stack().is_empty() {
-                        reg.titles.insert(*id, screen.title_stack().to_vec());
+                        titles.insert(*id, screen.title_stack().to_vec());
                     }
                 }
             }

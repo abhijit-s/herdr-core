@@ -273,7 +273,7 @@ mod ffi {
 /// Unfinished escape sequences kept so a snapshot can be taken at any byte.
 const CONTINUATION_MAX_BYTES: usize = 64 * 1024;
 /// Titles kept by XTWINOPS 22, as in xterm; a push past it drops the oldest.
-pub const TITLE_STACK_DEPTH: usize = 10;
+const TITLE_STACK_DEPTH: usize = 10;
 /// Cell size reported in pixels until a viewer tells us its own.
 const DEFAULT_CELL: (u32, u32) = (10, 20);
 /// Ghostty's default theme, answered until a viewer tells us its own colors.
@@ -668,7 +668,15 @@ impl Terminal {
         &self.titles
     }
 
+    /// A saved stack, read back from disk. A title holding a control character
+    /// never came from an OSC and would reach every viewer: its entry keeps its
+    /// slot but restores nothing.
     pub fn set_title_stack(&mut self, mut titles: Vec<Option<String>>) {
+        for t in &mut titles {
+            if t.as_deref().is_some_and(|s| s.chars().any(char::is_control)) {
+                *t = None;
+            }
+        }
         titles.drain(..titles.len().saturating_sub(TITLE_STACK_DEPTH));
         self.titles = titles;
     }

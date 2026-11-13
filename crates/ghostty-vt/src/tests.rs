@@ -353,9 +353,13 @@ fn an_index_reads_or_replaces_a_saved_title_in_place() {
 }
 
 #[test]
-fn a_restored_title_stack_keeps_at_most_the_newest_ten() {
+fn a_restored_title_stack_keeps_the_newest_ten_and_no_control_characters() {
     let mut t = Terminal::new(80, 24, 0);
-    t.set_title_stack((0..12).map(|n| Some(n.to_string())).collect());
+    let mut saved: Vec<_> = (0..12).map(|n| Some(n.to_string())).collect();
+    saved[11] = Some("\x1b]52;c;eA==\x07".into());
+    t.set_title_stack(saved);
     assert_eq!(t.title_stack().len(), TITLE_STACK_DEPTH);
     assert_eq!(t.title_stack()[0].as_deref(), Some("2"));
+    assert_eq!(t.pop_title(0, 0), None, "its slot stays, restoring nothing");
+    assert_eq!(t.pop_title(0, 0).as_deref(), Some("10"));
 }

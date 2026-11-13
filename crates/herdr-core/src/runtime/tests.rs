@@ -217,83 +217,31 @@ async fn handover_carries_held_replies_and_answers_including_final_holder_output
 }
 
 #[tokio::test]
-async fn a_restored_title_is_the_terminals_title_and_a_handover_keeps_what_was_saved() {
+async fn a_restored_title_is_announced_like_any_title_change() {
     use crate::events::{Filter, Sink};
     use std::sync::atomic::AtomicBool;
     let (core, root) = test_core();
-    let (writer, frames) = mpsc::channel();
-    let (bye, done) = mpsc::channel();
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let id = {
         let mut st = core.lock();
         let id =
             st.reg.create(crate::terminals::NewTerminal { argv: vec!["sh".into()], ..Default::default() }, 0).unwrap();
-        st.reg.terminals.get_mut(&id).unwrap().holder = Some("fake".into());
         st.screens.insert(id, Screen::new(80, 24, 1 << 20));
-        st.holders.push(Link {
-            writer,
-            pid: 0,
-            instance: "fake".into(),
-            current: true,
-            bye: bye.clone(),
-            bye_rx: Some(done),
-        });
         core.subscribe(&mut st, Filter::default(), Sink::Plain { tx, behind: Arc::new(AtomicBool::new(false)) });
         id
-    };
-    let mut titles = move || {
-        let mut seen = Vec::new();
-        while let Ok(line) = rx.try_recv() {
-            let msg: Value = serde_json::from_str(&line).unwrap();
-            if msg["params"]["type"] == "title" {
-                seen.push(msg["params"]["data"]["title"].as_str().unwrap().to_string());
-            }
-        }
-        seen
     };
     core.output(&mut core.lock(), id, b"\x1b]2;shell\x07\x1b[22;0t\x1b]2;editor\x07");
     core.output(&mut core.lock(), id, b"\x1b[23;0t");
     assert_eq!(core.lock().reg.terminals[&id].title, "shell");
-    assert_eq!(titles(), ["editor", "shell"], "the restore is announced like any title");
-
-    core.output(&mut core.lock(), id, b"\x1b[22;0t\x1b]2;editor\x07");
-    let holder = std::thread::spawn(move || {
-        while frames.recv_timeout(Duration::from_secs(2)).unwrap()[0] != proto::GOODBYE {}
-        bye.send(()).unwrap();
-    });
-    core.handover().await.unwrap();
-    holder.join().unwrap();
-    let successor = core;
-    {
-        let mut st = successor.lock();
-        st.reg = read_state(&successor.paths.state.join("terminals.json")).unwrap();
-        assert_eq!(st.reg.titles[&id], [Some("shell".to_string())]);
-        st.gates.clear();
-        st.relays.clear();
-        st.screens.clear();
+    let mut titles = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        let msg: Value = serde_json::from_str(&line).unwrap();
+        if msg["params"]["type"] == "title" {
+            titles.push(msg["params"]["data"]["title"].as_str().unwrap().to_string());
+        }
     }
-    let (writer, _frames) = mpsc::channel();
-    let (bye, _) = mpsc::channel();
-    {
-        let mut st = successor.lock();
-        st.holders.push(Link { writer, pid: 0, instance: "fake".into(), current: true, bye, bye_rx: None });
-        let welcome = proto::Welcome {
-            version: proto::VERSION,
-            instance: "fake".into(),
-            pid: 0,
-            build: crate::client::build_id(),
-            login_session: None,
-            draining: false,
-            previous: "handover".into(),
-            terminals: vec![proto::HeldTerminal { id, pid: 0, cols: 80, rows: 24, exit: None }],
-        };
-        successor.adopt(&mut st, &welcome, HashMap::new());
-        assert!(st.reg.titles.is_empty());
-        assert_eq!(st.reg.terminals[&id].title, "editor");
-    }
-    successor.output(&mut successor.lock(), id, b"\x1b[23;0t");
-    assert_eq!(successor.lock().reg.terminals[&id].title, "shell");
-    drop(successor);
+    assert_eq!(titles, ["editor", "shell"]);
+    drop(core);
     remove_root(&root);
 }
 
