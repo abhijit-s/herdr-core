@@ -22,7 +22,8 @@ fn caller_environment() -> std::collections::BTreeMap<String, String> {
     handed_over(crate::platform::utf8_vars())
 }
 
-/// A login profile's `hc` runs inside `linux_login`'s capture, whose mark is not the shell's own.
+/// A login profile's `hc` runs inside `linux_login`'s capture, whose mark
+/// (`platform/linux_login.rs` `CAPTURING`) is not the shell's own.
 pub(super) fn handed_over(vars: impl Iterator<Item = (String, String)>) -> std::collections::BTreeMap<String, String> {
     vars.filter(|(k, _)| !k.starts_with('=') && k != "HC_LOGIN_CAPTURE").collect()
 }
