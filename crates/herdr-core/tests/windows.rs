@@ -554,7 +554,12 @@ fn a_shell_line_runs_in_cmd_quotes_and_all_and_no_program_is_powershell() {
     let _ = conn.wait();
     let reply: Value = serde_json::from_str(&reply).unwrap();
     let shell = reply["result"]["argv"][0].as_str().unwrap_or_default().to_string();
-    assert!(shell == "pwsh.exe" || shell == "powershell.exe", "{reply}");
+    let path = Path::new(&shell);
+    assert!(
+        shell == "powershell.exe"
+            || (path.is_absolute() && path.file_name().is_some_and(|name| name == "pwsh.exe") && path.is_file()),
+        "{reply}"
+    );
 }
 
 #[test]
@@ -785,6 +790,19 @@ fn restart_and_a_core_crash_keep_terminals_and_stop_leaves_nothing() {
 }
 
 #[test]
+fn what_a_shell_runs_is_in_front_until_it_ends() {
+    let s = Session::new();
+    let t = s.bg(&["cmd.exe"]);
+    let front = || s.json(&["get", &t])["foreground"]["name"].as_str().unwrap_or_default().to_lowercase();
+    wait_until("the shell in front", || front() == "cmd.exe");
+    s.out(&["send", &t, "ping -n 60 127.0.0.1"]);
+    wait_until("ping in front", || front() == "ping.exe");
+    let stop = s.json(&["interrupt", &t, "--timeout", "10"]);
+    assert_eq!(stop["outcome"], "stopped", "the shell got the terminal back: {stop}");
+    wait_until("the shell in front again", || front() == "cmd.exe");
+}
+
+#[test]
 fn the_folder_a_shell_moves_to_is_seen_and_a_lost_kept_shell_returns_there() {
     let s = Session::new();
     let dir = s.root.join("moved here");
@@ -900,4 +918,24 @@ fn configured_shell_uses_argv_and_is_read_live_for_new_and_recovered_terminals()
         let err: Value = serde_json::from_slice(&out.stderr).unwrap();
         assert_eq!(err["error"]["kind"], kind, "{err}");
     }
+}
+
+#[test]
+fn a_lost_kept_terminal_shows_what_its_program_left_above_the_new_shell() {
+    let s = Session::new();
+    let config = s.root.join("config/herdr-core/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "restore_screen = true\n").unwrap();
+    let t = s.bg(&["--keep", "cmd.exe", "/c", "echo left-on-screen& ping -n 120 127.0.0.1 >nul"]);
+    let text = |t: &str| s.out(&["read", t, "--lines", "200"]).1;
+    wait_until("output", || text(&t).contains("left-on-screen"));
+    let old = s.json(&["get", &t])["pid"].as_u64().unwrap();
+    let holder = s.json(&["server", "status"])["holder"]["pid"].as_u64().unwrap();
+    Command::new("taskkill").args(["/F", "/PID", &holder.to_string()]).output().unwrap();
+    wait_until("new shell", || s.json(&["get", &t])["pid"].as_u64().is_some_and(|p| p != old));
+    s.out(&["send", &t, "echo ('after-' + 2)"]);
+    wait_until("new shell answers", || text(&t).contains("after-2"));
+    let text = text(&t);
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle:?} missing: {text:?}"));
+    assert!(at("left-on-screen") < at("this is a new shell") && at("this is a new shell") < at("after-2"), "{text:?}");
 }
