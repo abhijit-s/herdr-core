@@ -93,6 +93,29 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 **Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
 
+### 2026-11-14: `e12fee2..c84d6e7` (`upstream/master`)
+
+Merged `upstream/master` (3 commits) into the fork's `143bb24`. One conflict, by position only; no fork fix needed.
+
+- `5413d0d` (#274) `hc connect` answers a caller that is done sending on Windows: the core never sees a pipe's half-close, so `connect` counts the plain-mode lines owed a reply (`plain_line`, `Owed`) and closes once every one is answered. It changes Unix too: until a framed `hello` or an `events.subscribe`, stdin goes through a `BufReader` a line at a time (`forward`), so a partial line waits for its newline, and input ending mid-line gains one; after that it pumps raw as before, and Unix still shuts down its write half at end of input. The herdr-app fork's client (`src/hc.rs` `Core::connect`) and the fork's `tests/environment.rs` app-connection test send a newline-ended framed `hello` first, so they hand off to raw pumping at once. The fork's piped-observer end is `hc attach` (`attach.rs`), which #274 doesn't touch; `connect` still opens through `platform::connect_for_app`, so the service-manager environment rule is unchanged. `cli/tests.rs` conflicted where the fork's `a_start_hands_over_the_shell_without_the_login_capture_mark` and #274's `connect_counts_the_plain_lines_the_core_answers` were both added; both stay.
+- `031f53b` (#273) a subscription can name the documents it wants (`events.subscribe` `docs`, `hc events --doc`; `events.rs` `Filter.docs`, `Target`). Naming documents and no terminal hears documents alone. The fork's `title` and `status` announcements (title stack, adoption announce, crash-tail replay) go through `Core::deliver` as terminal facts, which every subscriber that names no documents still hears; neither the fork nor the app names any. Every `Filter` literal and `doc_event` caller is upstream's. `schema/hc.openrpc.json` carries both the fork's `build` and #273's `docs`; `docs/commands.md` still matches the help (`cli_docs`).
+- `c84d6e7` remote children reach their parent during their first foreground run: `remote/run.rs` `RunGrant` grants a remote `hc run` access to its local parent before the call and revokes it only when the error proves no child started (`State.afar_runs`). "Foreground" here is a foreground `hc run` across machines, not the fork's launch-task reset in `foreground.rs`. `remote.rs` and `remote/` equal upstream's; `afar_runs` sits beside the fork's `State.crash_tails`, and the extra `core.save` doesn't touch `Registry.titles`, which only a handover writes.
+- Open upstream PR branches `up/title-stack` (#265), `perf/holder-gather` (#246) and `up/observe-eof` (#184) each merge cleanly into `c84d6e7`, so they are left alone. `git diff upstream/master -- crates/herdr-core/src/platform/unix.rs crates/herdr-core/src/holder.rs` still shows only the gathered reads.
+
+| Gate (macOS) | master `143bb24` | branch |
+| --- | --- | --- |
+| `cargo fmt --check` | pass | pass |
+| clippy `-D warnings`, Rust 1.95.0 (CI's) | pass | pass |
+| clippy `-D warnings`, Windows with zig stubbed, Rust 1.100 | pass | pass |
+| `cargo test --locked` | 558 passed, 0 failed, 3 ignored | 568 passed, 0 failed, 3 ignored (upstream's 10 new tests) |
+| holder, 10 MB `yes` burst (median of 10) | 2171 M instructions, 0.345 s CPU | 2172 M instructions, 0.336 s CPU |
+| core, same burst | 7838 M instructions, 0.449 s CPU | 7882 M instructions, 0.448 s CPU |
+| holder, 10 s idle | 3.38 ms CPU, 5.7 M instructions | 3.31 ms CPU, 5.8 M instructions |
+
+- Performance method as before: release builds, isolated cores under `env -i` with a system PATH, 10 interleaved passes per side, each started at a 1-minute load of 4.0 or less, `proc_pid_rusage`; each pass recorded its core's `build`. Holder instructions are equal; the core's +0.6% is inside master's own 7810–7941 M range. No regression.
+- Windows clippy ran on Rust 1.100: the 1.95.0 toolchain here has no Windows target. Not run: Linux, `cargo deny`, the Windows-only `tests/windows.rs` `connect_answers_a_caller_that_is_done_sending` (this PR's CI runs the Linux and Windows suites).
+- Reviews: an independent code review and a skeptic review found no interaction needing a fix; the skeptic's note that #274 also changes Unix line handling is recorded above.
+
 ### 2026-11-14: `1b0393f..e12fee2` (`upstream/master`)
 
 Merged `upstream/master` (4 commits after 0.1.21) into the fork's `b2df482`. No conflicts; one fork fix to match #270.
