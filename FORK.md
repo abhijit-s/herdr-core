@@ -91,6 +91,28 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 ## Upstream syncs
 
+### 2026-11-14: `1b0393f..e12fee2` (`upstream/master`)
+
+Merged `upstream/master` (4 commits after 0.1.21) into the fork's `b2df482`. No conflicts; one fork fix to match #270.
+
+- `e12fee2` (#271) a viewer that stayed active keeps its size when a dropped line to another machine comes back: `remote::viewers::Relayed` gains `active_at`, set by a non-observer's input, size or focus, and `reattach` replays the waiting viewers oldest-active first. `remote.rs` and `remote/` equal upstream's (the fork changes nothing there), and `Relayed` is built only in `remote/viewers.rs` and `remote/tests.rs`. The fork's title stack lives in the local relay and screen (`relay.rs`, `ghostty_vt::Terminal`, `Registry.titles`), which a remote reattach doesn't touch; the local `viewers.rs` keeps its own `active_at` leader rule, unchanged.
+- `d9e6826` and `8e4446b` (#270) a full disk or an unwritable stderr no longer stops the core saving terminals: the core's save and log paths write diagnostics with `writeln!` and ignore its error, where `eprintln!` panicked. The fork's `eprintln!` calls in `cli/server.rs` `start` and `restart` run on the client. The fork's `windows_env::service_base` does not: on Windows the holder reaches it when it respawns the core (`holder.rs` `spawn_core` → `client.rs` → `platform/windows.rs` `spawn_detached`), so it now writes with `writeln!` and ignores the error as #270 does. `git diff upstream/master -- crates/herdr-core/src/platform/unix.rs crates/herdr-core/src/holder.rs` still shows only the gathered reads.
+- `ec63ef3` documents `hc exec`'s 60 s limit in `SKILL.md`, which still differs from upstream's only by the fork's `hc server start` sentence.
+- Each worktree built in its own target dir. A first branch run on master's shared `CARGO_TARGET_DIR` reused master's artifacts (557 tests, without #271's), as the build identifier section warns.
+
+| Gate (macOS) | master `b2df482` | branch |
+| --- | --- | --- |
+| `cargo fmt --check` | pass | pass |
+| clippy `-D warnings`, Rust 1.95.0 (CI's) | pass | pass |
+| clippy `-D warnings`, Rust 1.100 | 1 error in upstream code: `needless_bool` `platform/unix.rs:286` | same |
+| `cargo test --locked` | 557 passed, 0 failed, 3 ignored | 558 passed, 0 failed, 3 ignored (#271's `returning_viewers_keep_the_last_active_viewers_size`) |
+| holder, 10 MB `yes` burst (median of 10) | 2152 M instructions, 0.348 s CPU | 2156 M instructions, 0.344 s CPU |
+| core, same burst | 7760 M instructions, 0.448 s CPU | 7754 M instructions, 0.441 s CPU |
+| holder, 10 s idle | 4.33 ms CPU, 5.7 M instructions | 4.15 ms CPU, 5.7 M instructions |
+
+- Performance method as on 2026-11-13: release builds, isolated cores under `env -i` with a system PATH, 10 interleaved passes per side, each started at a 1-minute load of 4.2 or less, `proc_pid_rusage`. Instructions differ by 0.2%, within master's own 2125–2202 M range. No regression.
+- Not run: Linux (both new `tests/persistence.rs` tests are Linux only and carry upstream's own CI), Windows clippy with zig stubbed, `cargo deny`.
+
 ### 2026-11-13: `7edc5df..1b0393f` (`upstream/master`, 0.1.21)
 
 Merged `upstream/master` (25 commits, release 0.1.21) into the fork's `4039839`.
