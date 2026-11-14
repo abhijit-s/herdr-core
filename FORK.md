@@ -91,6 +91,8 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 ## Upstream syncs
 
+**Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
+
 ### 2026-11-14: `1b0393f..e12fee2` (`upstream/master`)
 
 Merged `upstream/master` (4 commits after 0.1.21) into the fork's `b2df482`. No conflicts; one fork fix to match #270.
