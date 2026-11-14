@@ -153,3 +153,21 @@ fn a_start_hands_over_the_shell_without_the_login_capture_mark() {
     let env = handed_over(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
     assert_eq!(env.keys().collect::<Vec<_>>(), ["HC_SESSION", "PATH"]);
 }
+
+#[test]
+fn connect_counts_the_plain_lines_the_core_answers() {
+    for (line, answered, last) in [
+        (r#"{"jsonrpc":"2.0","id":1,"method":"doc.get"}"#, true, false),
+        (r#"{"jsonrpc":"2.0","id":null,"method":"doc.get"}"#, true, false),
+        (r#"{"jsonrpc":"2.0","method":"doc.get"}"#, false, false),
+        (r#"{"foo":1}"#, true, false),
+        ("[1,2]", true, false),
+        ("not json", true, false),
+        (" \r", false, false),
+        (r#"{"id":1,"method":"events.subscribe","params":{}}"#, true, true),
+        (r#"{"id":1,"method":"hello","params":{"framed":true}}"#, true, true),
+        (r#"{"id":1,"method":"hello","params":{"framed":false}}"#, true, false),
+    ] {
+        assert_eq!(plain_line(format!("{line}\n").as_bytes()), (answered, last), "{line}");
+    }
+}
