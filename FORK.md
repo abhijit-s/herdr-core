@@ -93,6 +93,21 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 **Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
 
+### 2026-11-16: `c84d6e7..bb8a2f7` (`upstream/master`)
+
+Merged `upstream/master` (1 commit) into the fork's `c593b3a`. No conflicts; no fork fix needed.
+
+- `bb8a2f7` (#200) a second core leaves a running core's socket and programs alone: `server::serve`, after taking `core.lock`, refuses to serve when `client::connect_existing` reaches a core on its socket (one of another `HOME` or `XDG_STATE_HOME`), where adopting would take its holders and end their programs. The fork's `server.rs` and `client.rs` are upstream's, so the check is as upstream wrote it. The fork's start paths pass it: a planned restart (and `hc server restart --fresh`) unlinks the socket (`remove_endpoint`) before the handover and the old core holds the lock until it exits, so the next core finds nothing listening; a holder respawning a crashed core meets a stale socket that refuses the connection; the launchd and systemd starts (`fix/autostart-service-env`) use no socket activation, and launchd's `KeepAlive` is false, so a refused core exits once rather than looping. On Windows a busy pipe reads as no core, so the check can miss one there, as upstream's does.
+- Reviews: an independent code review and a skeptic review traced those paths and found no fork start path the check refuses.
+- Each worktree built in its own target dir with Rust 1.95.0 and Zig 0.16.0 (CI's); Homebrew's Zig 0.17.1 fails ghostty's `requireZig`.
+
+| Gate (macOS) | master `c593b3a` | branch |
+| --- | --- | --- |
+| `cargo fmt --check` | pass | pass |
+| `cargo test --locked --no-fail-fast` | 568 passed, 0 failed, 3 ignored | 569 passed, 0 failed, 3 ignored (upstream's new test) |
+
+- Not run: clippy, `cargo deny`, Linux and Windows suites, the holder and core bursts: the change runs once at a core's start, on no output or idle path.
+
 ### 2026-11-14: `e12fee2..c84d6e7` (`upstream/master`)
 
 Merged `upstream/master` (3 commits) into the fork's `143bb24`. One conflict, by position only; no fork fix needed.
