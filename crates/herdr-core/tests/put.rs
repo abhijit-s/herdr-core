@@ -69,7 +69,7 @@ fn slow_uplink(s: &mut Session, rohan: &Session) {
     let (stall, sent) = (s.root.join("stall"), s.root.join("sent"));
     let slow = s.root.join("slow-ssh");
     let script =
-        format!("#!/bin/sh\npython3 {} {} {} | {fake} \"$@\"\n", throttle.display(), stall.display(), sent.display());
+        format!("#!/bin/sh\n{} {} {} {} | {fake} \"$@\"\n", common::python3(), throttle.display(), stall.display(), sent.display());
     std::fs::write(&slow, script).unwrap();
     std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     s.env.push((var, slow.display().to_string()));
@@ -478,7 +478,7 @@ fn a_piece_never_answered_gives_the_line_up_and_the_next_put_works() {
     .unwrap();
     let withheld = s.root.join("withheld");
     let ssh = s.root.join("withholding-ssh");
-    let script = format!("#!/bin/sh\n{fake} \"$@\" | python3 {} {}\n", filter.display(), withheld.display());
+    let script = format!("#!/bin/sh\n{fake} \"$@\" | {} {} {}\n", common::python3(), filter.display(), withheld.display());
     std::fs::write(&ssh, script).unwrap();
     std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     s.env.push((var, ssh.display().to_string()));

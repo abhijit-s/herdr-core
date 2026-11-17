@@ -93,6 +93,21 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 **Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
 
+### 2026-11-17: `bb8a2f7..c751780` (`upstream/master`)
+
+Merged `upstream/master` (2 commits) into the fork's `4c6e113` (merge `1e97337`). No conflicts. One fork fix, in tests only.
+
+- `dfde150` a put to another machine is sent in acknowledged pieces, and `c751780` a late put piece can't touch a transfer that reused its handle: taken as written (`api/put.rs`, `remote/put.rs`, `put.rs`, the new `terminal.put_*` methods in `cli.rs` `API_ONLY`, `api/types.rs` and the schema). The fork's `StatusResult.build` and its crash tails sit in other sections of the same files.
+- Test fix: four of upstream's new `tests/put.rs` tests run `python3` from a fake ssh script that a test core starts, which on the fork takes the service manager's PATH (`fix/autostart-service-env`), where python3 can be a version manager's shim that fails with a session's HOME. They use `common::python3()` (the runner's interpreter by full path), as the fork's other tests do. On `upstream/master` itself the same tests pass on this machine.
+- Reviews: an independent code review and a skeptic review found the merge brings in exactly upstream's change.
+- Each worktree built in its own target dir with Rust 1.95.0 and Zig 0.16.0.
+
+| Gate (macOS) | master `4c6e113` | branch |
+| --- | --- | --- |
+| `cargo test --locked` | 569 passed, 0 failed, 3 ignored | 585 passed, 0 failed, 3 ignored (upstream's new put tests) |
+
+- Not run: clippy, `cargo deny`, Linux and Windows suites. Not installed: `just install` restarts the running core.
+
 ### 2026-11-16: `c84d6e7..bb8a2f7` (`upstream/master`)
 
 Merged `upstream/master` (1 commit) into the fork's `c593b3a`. No conflicts; no fork fix needed.
