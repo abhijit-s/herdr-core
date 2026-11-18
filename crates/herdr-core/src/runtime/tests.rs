@@ -373,6 +373,38 @@ async fn a_wait_leaves_nothing_registered_however_it_ends() {
     assert_eq!(left, (0, 0), "(event subscriptions, output watchers) left behind");
 }
 
+#[tokio::test]
+async fn screen_first_reads_start_one_background_stitch_per_terminal() {
+    use crate::stitch::Soon;
+    let (core, root) = test_core();
+    let (writer, _frames) = mpsc::channel();
+    let (bye, _) = mpsc::channel();
+    let id = {
+        let mut st = core.lock();
+        let id =
+            st.reg.create(crate::terminals::NewTerminal { argv: vec!["sh".into()], ..Default::default() }, 0).unwrap();
+        st.reg.terminals.get_mut(&id).unwrap().holder = Some("fake".into());
+        st.screens.insert(id, Screen::new(80, 24, 1 << 20));
+        st.holders.push(Link { writer, pid: 0, instance: "fake".into(), current: true, bye, bye_rx: None });
+        core.output(&mut st, id, b"\x1b[?1049h\x1b[?1000h\x1b[?1006hhello");
+        id
+    };
+    // A send in progress: the stitch waits behind it, still queued.
+    let queue = core.lock().queues.entry(id).or_default().clone();
+    let turn = queue.lock().await;
+    let runtime = tokio::runtime::Handle::current();
+    let baseline = runtime.metrics().num_alive_tasks();
+    for _ in 0..5 {
+        assert!(matches!(core.stitch_soon(id, 100), Soon::Pending));
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(runtime.metrics().num_alive_tasks(), baseline + 1, "one stitch task");
+    assert!(core.lock().stitch_soon.contains(&id));
+    drop(turn);
+    drop(core);
+    remove_root(&root);
+}
+
 fn test_core() -> (Arc<Core>, PathBuf) {
     let root = std::env::temp_dir().join(format!("hc-persistence-{}", platform::random_hex()));
     let paths = Paths {

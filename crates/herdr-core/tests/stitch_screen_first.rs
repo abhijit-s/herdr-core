@@ -128,3 +128,78 @@ fn plain_and_busy_terminals_give_one_answer() {
     }
     assert!(screen(&s, &busy).contains("wheels=0 "), "a busy app is never scrolled");
 }
+
+fn wheel_count(s: &Session, t: &str) -> usize {
+    wheels(s, t).and_then(|w| w.parse().ok()).unwrap()
+}
+
+/// Polls `screen_first` until nothing is pending; the last answer.
+fn settle(conn: &mut Conn, t: &str) -> Value {
+    let mut last = Value::Null;
+    wait_until_for("background stitch done", Duration::from_secs(40), || {
+        last = screen_first(conn, t);
+        last["pending"] != true
+    });
+    last
+}
+
+/// No wheel input for a while, however often it is asked.
+fn never_scrolls_again(s: &Session, conn: &mut Conn, t: &str) {
+    wait_until("view restored", || screen(s, t).contains("line 050"));
+    let before = wheel_count(s, t);
+    for _ in 0..10 {
+        let r = screen_first(conn, t);
+        assert!(r.get("pending").is_none(), "{r}");
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    assert_eq!(wheel_count(s, t), before, "scrolled again");
+}
+
+#[test]
+fn an_idle_screen_that_keeps_redrawing_is_scrolled_once() {
+    let s = session();
+    // A clock that ticks slower than a stitch's one-second quiet check, so
+    // the stitch finishes and its cache goes stale at the next tick.
+    let flags = ["--lines", "50", "--blink", "1500"];
+    // One background stitch's worth of wheel input.
+    let twin = app(&s, &flags);
+    let mut conn = s.connect();
+    assert_eq!(screen_first(&mut conn, &twin)["pending"], true);
+    settle(&mut conn, &twin);
+    wait_until("view restored", || screen(&s, &twin).contains("line 050"));
+    let one = wheel_count(&s, &twin);
+    assert!(one > 0);
+
+    // Asked five times at once, then polled while the clock keeps making its
+    // cache stale: one stitch's worth of wheel input, then none. (That only
+    // one stitch starts is `runtime::tests::screen_first_reads_start_one_background_stitch_per_terminal`.)
+    let t = app(&s, &flags);
+    for _ in 0..5 {
+        assert_eq!(screen_first(&mut conn, &t)["pending"], true);
+    }
+    settle(&mut conn, &t);
+    wait_until("view restored", || screen(&s, &t).contains("line 050"));
+    assert!(wheel_count(&s, &t) < one * 2, "{} wheel notches, one stitch is {one}", wheel_count(&s, &t));
+    never_scrolls_again(&s, &mut conn, &t);
+}
+
+#[test]
+fn a_background_stitch_a_key_cut_short_is_not_tried_again_at_once() {
+    let s = session();
+    let t = app(&s, &["--lines", "50", "--slow", "60"]);
+    let mut v = common::framed::Viewer::attach(&s, &t, 40, 12, json!({}));
+    v.shows("line 050");
+    let mut conn = s.connect();
+    assert_eq!(screen_first(&mut conn, &t)["pending"], true);
+    wait_until("scrolling", || wheel_count(&s, &t) > 1);
+    v.typed(b"x");
+    let r = settle(&mut conn, &t);
+    assert_eq!((r["how"].as_str(), r["complete"].as_bool()), (Some("screen"), Some(false)), "{r}");
+    wait_until("the key went in", || screen(&s, &t).contains("keys=x"));
+    never_scrolls_again(&s, &mut conn, &t);
+
+    // A plain read still scrolls, as it always did.
+    let before = wheel_count(&s, &t);
+    s.json(&["read", &t, "--lines", "200"]);
+    assert!(wheel_count(&s, &t) > before);
+}

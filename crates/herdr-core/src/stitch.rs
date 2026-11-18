@@ -187,26 +187,52 @@ pub enum Soon {
     Ready(String, bool),
     /// Scrolling in the background; a read once it is done answers from memory.
     Pending,
-    /// Can't be stitched: read the plain screen.
+    /// Can't be stitched, or a background stitch ran less than `SOON_EVERY`
+    /// ago and left nothing to answer from: read the plain screen.
     No,
+}
+
+/// A background stitch starts at most this often per terminal. While its cache
+/// holds (nothing printed since) reads answer from it; once that is gone (a
+/// key cut it short, the pages didn't line up, or the app printed, as a clock
+/// or spinner keeps doing) `screen_first` answers with the screen until this
+/// has passed, whatever is printed meanwhile: a screen that keeps redrawing
+/// would otherwise be scrolled on every poll.
+const SOON_EVERY: Duration = Duration::from_secs(30);
+
+/// Marks a terminal's background stitch as running until it is dropped (on
+/// any exit), then notes when it ended.
+struct Soonish {
+    core: std::sync::Arc<Core>,
+    id: u32,
+}
+
+impl Drop for Soonish {
+    fn drop(&mut self) {
+        let mut st = self.core.lock();
+        st.stitch_soon.remove(&self.id);
+        st.stitch_ended.insert(self.id, Instant::now());
+    }
 }
 
 impl Core {
     /// Like `stitch`, without waiting: an answer from memory if there is one,
     /// otherwise the scroll starts in the background (unless one is already
-    /// running for this terminal) so the next read finds it there.
+    /// queued or running for this terminal) so the next read finds it there.
     pub fn stitch_soon(self: &std::sync::Arc<Self>, id: u32, lines: usize) -> Soon {
-        let st = self.lock();
+        let mut st = self.lock();
         match ready(&st, id, lines) {
             Err(()) => Soon::No,
             Ok(Some((text, complete))) => Soon::Ready(text, complete),
+            Ok(None) if st.stitch_soon.contains(&id) => Soon::Pending,
+            Ok(None) if st.stitch_ended.get(&id).is_some_and(|t| t.elapsed() < SOON_EVERY) => Soon::No,
             Ok(None) => {
-                // A stitch already running (or queued behind input) ends with a
-                // fresh cache; a second one queued behind it answers from that.
-                if !st.stitching.contains(&id) {
-                    let core = self.clone();
-                    tokio::spawn(async move { core.stitch(id, lines).await });
-                }
+                st.stitch_soon.insert(id);
+                let guard = Soonish { core: self.clone(), id };
+                tokio::spawn(async move {
+                    guard.core.stitch(id, lines).await;
+                    drop(guard);
+                });
                 Soon::Pending
             }
         }
