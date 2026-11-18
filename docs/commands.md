@@ -461,6 +461,7 @@ Arguments:
 Options:
       --json           JSON output even in a terminal
       --lines <LINES>  Lines of history above the screen [default: 0]
+      --screen-first   Don't wait for a full-screen app to be scrolled: answer with its screen and `pending: true`, and read its history in the background, so a read once that is done answers from memory. With the CLI: print the screen, then the full read
   -h, --help           Print help
 ```
 

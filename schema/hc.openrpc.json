@@ -741,6 +741,10 @@
             "description": "\"screen\", \"history\", or \"stitched\" (a full-screen app, read by scrolling it).",
             "type": "string"
           },
+          "pending": {
+            "description": "With `screen_first`: only the screen so far, its history is being read;\nread again (without `screen_first`) for it.",
+            "type": "boolean"
+          },
           "text": {
             "type": "string"
           },
@@ -755,7 +759,8 @@
         "required": [
           "text",
           "complete",
-          "how"
+          "how",
+          "pending"
         ],
         "type": "object"
       },
@@ -2369,6 +2374,15 @@
             "format": "uint",
             "minimum": 0,
             "type": "integer"
+          }
+        },
+        {
+          "description": "Don't wait for a full-screen app to be scrolled: answer with its screen\nand `pending: true`, and read its history in the background, so a read\nonce that is done answers from memory. With the CLI: print the screen,\nthen the full read.",
+          "name": "screen_first",
+          "required": false,
+          "schema": {
+            "description": "Don't wait for a full-screen app to be scrolled: answer with its screen\nand `pending: true`, and read its history in the background, so a read\nonce that is done answers from memory. With the CLI: print the screen,\nthen the full read.",
+            "type": "boolean"
           }
         },
         {

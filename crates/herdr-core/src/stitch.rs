@@ -164,26 +164,60 @@ impl Capture {
     }
 }
 
+/// What a stitched read would give right now. `Err`: it can't be stitched
+/// (read the plain screen). `Ok(Some)`: nothing printed since a read that
+/// covers this one, the answer from memory. `Ok(None)`: it has to scroll.
+fn ready(st: &crate::runtime::State, id: u32, lines: usize) -> Result<Option<(String, bool)>, ()> {
+    let t = st.reg.terminals.get(&id).filter(|t| t.is_live()).ok_or(())?;
+    let screen = st.screens.get(&id).ok_or(())?;
+    let busy = t.status.as_ref().is_some_and(|s| matches!(s.state.as_str(), "working" | "blocked" | "error"));
+    if !screen.alt_screen() || busy || screen.wheel(true).is_empty() {
+        return Err(());
+    }
+    Ok(st
+        .stitched
+        .get(&id)
+        .filter(|(seq, capture)| st.output_seq.get(&id) == Some(seq) && capture.covers(lines))
+        .map(|(_, capture)| capture.answer(lines)))
+}
+
+/// A stitched read that doesn't wait for the scroll.
+pub enum Soon {
+    /// From memory: the same answer `stitch` would give.
+    Ready(String, bool),
+    /// Scrolling in the background; a read once it is done answers from memory.
+    Pending,
+    /// Can't be stitched: read the plain screen.
+    No,
+}
+
 impl Core {
+    /// Like `stitch`, without waiting: an answer from memory if there is one,
+    /// otherwise the scroll starts in the background (unless one is already
+    /// running for this terminal) so the next read finds it there.
+    pub fn stitch_soon(self: &std::sync::Arc<Self>, id: u32, lines: usize) -> Soon {
+        let st = self.lock();
+        match ready(&st, id, lines) {
+            Err(()) => Soon::No,
+            Ok(Some((text, complete))) => Soon::Ready(text, complete),
+            Ok(None) => {
+                // A stitch already running (or queued behind input) ends with a
+                // fresh cache; a second one queued behind it answers from that.
+                if !st.stitching.contains(&id) {
+                    let core = self.clone();
+                    tokio::spawn(async move { core.stitch(id, lines).await });
+                }
+                Soon::Pending
+            }
+        }
+    }
+
     /// Reads a full-screen app's history by scrolling it with the mouse wheel,
     /// then scrolls it back. Only for an app on the alternate screen that takes
     /// the wheel and isn't working, blocked or in error. `None`: read the plain
     /// screen instead, marked incomplete (any doubt ends up here).
     pub async fn stitch(&self, id: u32, lines: usize) -> Option<(String, bool)> {
-        // Nothing printed since a read that covers this one: answer from memory.
-        let ready = |st: &crate::runtime::State| -> Result<Option<(String, bool)>, ()> {
-            let t = st.reg.terminals.get(&id).filter(|t| t.is_live()).ok_or(())?;
-            let screen = st.screens.get(&id).ok_or(())?;
-            let busy = t.status.as_ref().is_some_and(|s| matches!(s.state.as_str(), "working" | "blocked" | "error"));
-            if !screen.alt_screen() || busy || screen.wheel(true).is_empty() {
-                return Err(());
-            }
-            Ok(st
-                .stitched
-                .get(&id)
-                .filter(|(seq, capture)| st.output_seq.get(&id) == Some(seq) && capture.covers(lines))
-                .map(|(_, capture)| capture.answer(lines)))
-        };
+        let ready = |st: &crate::runtime::State| ready(st, id, lines);
         if let Some(answer) = ready(&self.lock()).ok()? {
             return Some(answer);
         }
