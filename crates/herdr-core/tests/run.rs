@@ -101,10 +101,26 @@ fn pagers_never_hold_a_run_and_huge_output_keeps_its_tail() {
     let repo = s.root.join("repo");
     std::fs::create_dir(&repo).unwrap();
     let r = repo.display().to_string();
-    let setup = format!(
-        "cd {r} && git init -q && for i in $(seq 1 150); do git -c user.name=t -c user.email=t@t commit -q --allow-empty -m c$i; done"
-    );
-    assert!(std::process::Command::new("sh").args(["-c", &setup]).status().unwrap().success());
+    // One fast-import, not 150 `git commit` processes: those took most of the
+    // binary's watchdog budget on a loaded host.
+    let history: String = (1..=150)
+        .map(|i| {
+            let from = if i > 1 { format!("from :{}\n", i - 1) } else { String::new() };
+            format!("commit refs/heads/t\nmark :{i}\ncommitter t <t@t> {i} +0000\ndata <<E\nc{i}\nE\n{from}\n")
+        })
+        .collect();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "--initial-branch=t"]).wait().unwrap().success());
+    let mut import = git(&["fast-import", "--quiet"]);
+    std::io::Write::write_all(&mut import.stdin.take().unwrap(), history.as_bytes()).unwrap();
+    assert!(import.wait().unwrap().success());
     // Longer than the 120-row screen: git would open less and wait.
     let (code, out) = hc(&s, &["run", "--timeout", "10", "--cwd", &r, "git", "log", "--oneline"]);
     assert_eq!(code, 0, "{out}");
