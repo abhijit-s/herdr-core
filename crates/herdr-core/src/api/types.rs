@@ -380,6 +380,15 @@ pub struct ReadParams {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub lines: usize,
+    /// Don't wait for a full-screen app to be scrolled: answer with its screen
+    /// and `pending: true`, and read its history in the background, so a read
+    /// once that is done answers from memory. A background read that leaves
+    /// nothing to answer from (a key cut it short, or the app keeps redrawing)
+    /// isn't tried again for 30 s: until then the answer is the screen. With
+    /// the CLI: print the screen, then the full read.
+    #[arg(long)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub screen_first: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -393,6 +402,12 @@ pub struct ReadResult {
     /// is not scrolled in these states).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// With `screen_first`: only the screen so far, its history is being read.
+    /// Ask again with `screen_first` until this is gone: the answer is then the
+    /// history from memory, or the screen if it left none. (Without
+    /// `screen_first` a read waits for it, but scrolls again if it left none.)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]

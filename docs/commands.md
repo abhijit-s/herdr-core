@@ -461,6 +461,7 @@ Arguments:
 Options:
       --json           JSON output even in a terminal
       --lines <LINES>  Lines of history above the screen [default: 0]
+      --screen-first   Don't wait for a full-screen app to be scrolled: answer with its screen and `pending: true`, and read its history in the background, so a read once that is done answers from memory. A background read that leaves nothing to answer from (a key cut it short, or the app keeps redrawing) isn't tried again for 30 s: until then the answer is the screen. With the CLI: print the screen, then the full read
   -h, --help           Print help
 ```
 

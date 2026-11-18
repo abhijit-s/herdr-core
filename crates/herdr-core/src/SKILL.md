@@ -74,6 +74,8 @@ current folder in `foreground.cwd`.
 full-screen app, then restore its view. While its status is `working`,
 `blocked` or `error`, history reads return only the screen immediately,
 marked incomplete with `why` set to that status; no scroll input is sent.
+`--screen-first` prints the screen at once, then the whole read when the
+scroll is done (`--json`: two lines, the first with `pending: true`).
 
 Keep doing useful work while children work. When you need their results:
 

@@ -399,9 +399,17 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
     let full_screen = core.lock().screens.get(&id).is_some_and(|s| s.alt_screen());
     if full_screen && p.lines > 0 {
         let lines = p.lines.min(FINISHED_LINES);
-        let result = match core.stitch(id, lines).await {
-            Some((text, complete)) => ReadResult { text, complete, how: "stitched".into(), why: None },
-            None => {
+        use crate::stitch::Soon;
+        let stitched = if p.screen_first {
+            core.stitch_soon(id, lines)
+        } else {
+            core.stitch(id, lines).await.map_or(Soon::No, |(text, complete)| Soon::Ready(text, complete))
+        };
+        let result = match stitched {
+            Soon::Ready(text, complete) => {
+                ReadResult { text, complete, how: "stitched".into(), why: None, pending: false }
+            }
+            plain => {
                 let st = core.lock();
                 let text = st.screens.get(&id).map(|s| crate::stitch::text(&s.screen_rows())).unwrap_or_default();
                 let why = st
@@ -411,7 +419,7 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
                     .and_then(|t| t.status.as_ref())
                     .filter(|s| matches!(s.state.as_str(), "working" | "blocked" | "error"))
                     .map(|s| s.state.clone());
-                ReadResult { text, complete: false, how: "screen".into(), why }
+                ReadResult { text, complete: false, how: "screen".into(), why, pending: matches!(plain, Soon::Pending) }
             }
         };
         core.flush_saved().await?;
@@ -441,6 +449,7 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
             complete,
             how: if p.lines == 0 { "screen" } else { "history" }.into(),
             why: None,
+            pending: false,
         }
     };
     core.flush_saved().await?;

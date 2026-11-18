@@ -83,6 +83,12 @@ pub struct State {
     /// The last stitched read per terminal, good while it prints nothing:
     /// (output count after it, what it captured).
     pub stitched: HashMap<u32, (u64, crate::stitch::Capture)>,
+    /// Terminals a background stitch (`screen_first`) is queued for or
+    /// scrolling. Apart from `stitching`, which pauses viewers only while
+    /// it scrolls.
+    pub stitch_soon: HashSet<u32>,
+    /// When a terminal's last background stitch ended.
+    pub stitch_ended: HashMap<u32, Instant>,
     /// Every holder we talk to: one of our build takes new terminals, older ones drain.
     pub holders: Vec<Link>,
     pub pending: HashMap<u32, oneshot::Sender<Result<crate::terminals::Terminal, String>>>,

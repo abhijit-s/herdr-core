@@ -457,7 +457,22 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
         Cmd::Read(mut p) => {
             p.terminal = pick(p.terminal)?;
             p.caller = Some(caller());
-            let r = call("terminal.read", to(&p))?;
+            let mut r = call("terminal.read", to(&p))?;
+            // Screen first: show it now, then ask again until the stitch it
+            // started is done: its answer from memory, or the screen when it
+            // left none (asking without `screen_first` would scroll again).
+            // JSON: one object per line.
+            if r["pending"] == true {
+                if asked {
+                    println!("{r}");
+                } else {
+                    println!("{}\n[hc] its screen; reading its history...", r["text"].as_str().unwrap_or_default());
+                }
+                while r["pending"] == true {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    r = call("terminal.read", to(&p))?;
+                }
+            }
             let mut human = r["text"].as_str().unwrap_or_default().to_string();
             if r["why"] == "working" {
                 human.push_str("\n[hc] only its screen: it is working; read again once it stops for its history");
