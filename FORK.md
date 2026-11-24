@@ -106,6 +106,25 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 **Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
 
+### 2026-11-25: `300a455..329cb66` (`upstream/master`)
+
+Merged `upstream/master` (6 commits) into the fork's `9639ba1` (merge `820c62b`). Two conflicts, both resolved as upstream's change with the fork's on top; one fork fix, in tests only.
+
+- `3407043` (#329) the holder keeps the tail a handover covered, so a crash before the next snapshot still rebuilds the screen: `Term.raw_offset`/`saved_offset`, `HeldTerminal` offsets, `Hello.tail_offsets`, and the new core replays only `tail[replay_from..]` onto a saved screen. `holder.rs` conflicted on one line, the pump's frame to the core: upstream's `t.raw_offset += excess as u64` is kept, with the fork's `to_core(&mut st, proto::frame(...))` taking the frame by value (`perf/pump-coalesce`). The gathered read (`Gather`) feeds the same tail extend, so every byte it hands the core is counted. `runtime.rs` conflicted in `adopt`: the fork's title-stack restore (`set_title_stack` on an exact screen) stays, set before upstream's `replay_from` and the relay replay, so the stack goes with the snapshot it was saved with and the tail's pushes land on it once. A crash adoption (`replay_from` 0) now replays a tail that can reach back before the last handover; the fork's deferred crash-tail replay (`crash_tails`) gets that longer tail as upstream's inline replay does, and after a crash that follows a planned restart the title stack is rebuilt from more output than before. `tests/m5.rs` crash-replay tests and m3's `a_core_crash_does_not_count_old_turns_twice` pass on it.
+- `59dfb26` (#387) a release hangs up and wakes (`SIGCONT`) the stopped foreground group: `Pty::hang_up(pid, still_open)` and `signaled_foreground`, taken as written. The fork's `RELEASE` branch is upstream's; the fork's `platform/unix.rs` lines are still only the gathered reads (`PtyOutput::read_now`). Test fix: its two new `tests/ghosts.rs` tests ran `exec python3`, which a test core started with the service manager's PATH can't run (`fix/autostart-service-env`); they use `common::python3()` (`5457015`), as the fork's other tests do.
+- Merged clean: `7cb4de4` (#363) `hc ls --table` (`cli.rs`, `help.txt`, `docs/commands.md`), `52edd21` (#374) a terminal reply typed as input doesn't hold sends for the draft wait (`input.rs`, `viewers.rs`), `a62bb79` (#403) viewers keep output under heavy coloured text (`wire.rs`, `viewers.rs`, `remote/viewers.rs`), `329cb66` sweep retries an empty first process scan.
+- Open upstream PR branches: `perf/holder-gather` (#246) now conflicts with `upstream/master` in `holder.rs` (#329's line above) and `up/title-stack` (#265) in `runtime.rs` (the `adopt` hunk above); `up/observe-eof` (#184) merges cleanly. The two are not updated in this sync: merging `upstream/master` into them and pushing updates upstream's PRs, which waits for the owner.
+- Built in its own target dir with Zig 0.16.0; clippy with Rust 1.95.0 (CI's).
+
+| Gate (macOS) | branch |
+| --- | --- |
+| `cargo fmt --check` | pass |
+| clippy `--all-targets -D warnings`, Rust 1.95.0 | pass |
+| `cargo test --locked --no-fail-fast` | 607 passed, 3 failed, 3 ignored: the two ghosts tests above (fixed after), and `tests/m1.rs` `releasing_a_terminal_mid_burst_stops_it_cleanly` (its read timed out, `WouldBlock`, under the full suite's load) |
+| `--test ghosts --test m1` alone, after the fix | 51 passed, 0 failed |
+
+- Not run: master's suite for a side-by-side count, `cargo deny`, Linux and Windows suites, the holder and core bursts. Not installed: `just install` restarts the running core.
+
 ### 2026-11-17: `bb8a2f7..c751780` (`upstream/master`)
 
 Merged `upstream/master` (2 commits) into the fork's `4c6e113` (merge `1e97337`). No conflicts. One fork fix, in tests only.
