@@ -123,7 +123,7 @@ os.read(r_fd, 1)
 "#,
     )
     .unwrap();
-    let t = run(&s, &format!("exec python3 {helper:?} {pid_file:?}"));
+    let t = run(&s, &format!("exec {} {helper:?} {pid_file:?}", python3()));
     let pids = started(&s, &["stopped-fg-poll"]);
     let _cleanup = Survivors(pids.clone());
     s.json(&["kill", &t]);
@@ -172,7 +172,7 @@ else:
 "#,
     )
     .unwrap();
-    let t = run(&s, &format!("exec python3 {helper:?} {pid_file:?}"));
+    let t = run(&s, &format!("exec {} {helper:?} {pid_file:?}", python3()));
     let pids = started(&s, &["turnover-fg"]);
     let survivors = Survivors(pids);
     s.json(&["kill", &t]);
