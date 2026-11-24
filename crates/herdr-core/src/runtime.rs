@@ -395,7 +395,7 @@ impl Core {
     ) -> io::Result<Vec<u32>> {
         std::io::Write::write_all(
             &mut stream,
-            &proto::json_frame(proto::HELLO, 0, &proto::Hello { version: proto::VERSION }),
+            &proto::json_frame(proto::HELLO, 0, &proto::Hello { version: proto::VERSION, tail_offsets: true }),
         )?;
         let welcome: proto::Welcome = match proto::read(&mut stream)? {
             Some((proto::WELCOME, _, payload)) => proto::parse(&payload)?,
@@ -545,9 +545,11 @@ impl Core {
             if exact && let Some(titles) = titles {
                 screen.set_title_stack(titles);
             }
+            let replay_from =
+                if exact { h.saved_offset.saturating_sub(h.raw_offset).min(tail.len() as u64) as usize } else { 0 };
             // Through a relay, like live output, so requests the screen doesn't keep are seen.
             let mut relay = Relay::default();
-            relay.feed(&mut screen, &tail);
+            relay.feed(&mut screen, &tail[replay_from..]);
             relay.flush(&mut screen);
             // After a handover the tail is new output nobody answered yet; after a
             // crash it was answered long ago and replies would be typed as garbage.
@@ -965,7 +967,11 @@ impl Core {
                     });
                     // The welcome may be unreadable (the reason relink failed).
                     // Shutdown needs no inventory: the holder ends its own programs.
-                    let hello = proto::json_frame(proto::HELLO, 0, &proto::Hello { version: proto::VERSION });
+                    let hello = proto::json_frame(
+                        proto::HELLO,
+                        0,
+                        &proto::Hello { version: proto::VERSION, tail_offsets: true },
+                    );
                     if io::Write::write_all(&mut stream, &hello).is_ok()
                         && io::Write::write_all(&mut stream, &proto::json_frame(proto::GOODBYE, 0, &mode)).is_ok()
                     {
