@@ -106,6 +106,24 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 **Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
 
+### 2026-11-27: `329cb66..2e8043a` (`upstream/master`)
+
+Merged `upstream/master` (2 commits) into the fork's `90b71ff` (merge `ac07c27`). No conflicts. One fork fix, in tests only.
+
+- `1f90391` (#429) and `2e8043a` (#433): a kept pane resumes a program that reports how to restart itself with OSC 7577 (`resume.rs`, `resume/launch.rs`, `resume/protocol.rs`, `platform/unix_resume.rs`, `platform/windows_resume.rs`, a `resume` record on `Terminal`), taken as written. Where it meets the fork: in `runtime.rs` `adopt`, upstream reads a tail's reports (`resume_output`) beside the fork's title-stack restore and deferred crash-tail replay, which it doesn't touch; in `platform/mod.rs` `restored_environment`, its `resume::TOKEN` joins the fork's launchd names in the list a restored program doesn't inherit.
+- Test fix: upstream's `tests/resume.rs` fixture passes `RESUME_*` and `SHELL` through the session's environment, which an autostarted core on the fork doesn't take (`fix/autostart-service-env`). The fixture starts the core explicitly before its first run, and `restart_preserves_the_program_and_stop_restores_a_first_process` again after its stop, as `keep.rs` and `m1.rs` do (`741ca18`). Without the second start that test times out waiting for the resumed program. A real resumed program on the fork gets what a new pane gets: an autostarted core's service manager environment plus the login profile.
+- Open upstream PR branches: `perf/holder-gather` (#246), `up/title-stack` (#265) and `up/observe-eof` (#184) all merge cleanly with the new `upstream/master` (`git merge-tree`), so none is updated.
+- Built in its own target dir with Zig 0.16.0; clippy with Rust 1.95.0 (CI's).
+
+| Gate (macOS) | branch |
+| --- | --- |
+| `cargo fmt --check` | pass |
+| clippy `--all-targets -D warnings`, Rust 1.95.0 | pass |
+| `cargo test --locked --no-fail-fast`, before the test fix | 618 passed, 9 failed, 3 ignored: the 8 `tests/resume.rs` tests above, and `tests/ghosts.rs` `a_run_while_stopping_is_refused` (`hc run` succeeded while the core was stopping, under the full suite's load) |
+| `--test resume --test ghosts` alone, after the fix | 20 passed, 0 failed |
+
+- Not run: the full suite after the fix, master's suite for a side-by-side count, `cargo deny`, Linux and Windows suites. Not installed with this merge: `just install` restarts the running core.
+
 ### 2026-11-25: `300a455..329cb66` (`upstream/master`)
 
 Merged `upstream/master` (6 commits) into the fork's `9639ba1` (merge `820c62b`). Two conflicts, both resolved as upstream's change with the fork's on top; one fork fix, in tests only.
