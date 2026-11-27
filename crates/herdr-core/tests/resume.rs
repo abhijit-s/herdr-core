@@ -118,6 +118,7 @@ impl Fixture {
                 mode,
             ]
         };
+        s.json(&["server", "start"]); // its panes get this session's RESUME_* and SHELL
         let t = run(s, &[["--keep", "--cwd", s.root.to_str().unwrap(), "--"].as_slice(), &argv].concat());
         wait_until("report reached core", || text(s, &t).contains("REPORT_WRITTEN"));
         t
@@ -316,6 +317,7 @@ fn restart_preserves_the_program_and_stop_restores_a_first_process() {
     assert!(exec.status.success());
     assert_eq!(exec.stdout, b"unset");
     s.json(&["server", "stop"]);
+    s.json(&["server", "start"]); // recovers with this session's environment
     f.verify_resume(&t);
     s.json(&["keys", &t, "enter"]);
     wait_until("direct program's ordinary exit ends the terminal", || get(s, &t)["state"] == "finished");
