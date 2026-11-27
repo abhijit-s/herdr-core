@@ -154,6 +154,10 @@ pub fn main() -> i32 {
             print!("{}", include_str!("../THIRD-PARTY-NOTICES"));
             return 0;
         }
+        [Some("__resume"), Some(file)] => return crate::resume::helper(std::path::Path::new(file), false),
+        [Some("__resume"), Some(file), Some("--first")] => {
+            return crate::resume::helper(std::path::Path::new(file), true);
+        }
         _ => {}
     }
     // Before parsing we can only guess (for how to print a parse error).
@@ -346,6 +350,8 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
     let pick_finished = |given: String| crate::cli::target(&paths, (!given.is_empty()).then_some(given), json, true);
     Ok(Some(match cmd {
         Cmd::Serve => {
+            // Serving starts single-threaded. Never pass this core's parent pane token on.
+            unsafe { std::env::remove_var(crate::resume::TOKEN) };
             crate::platform::prepare_core();
             crate::server::serve().map_err(|e| RpcError::internal(e.to_string()))?;
             return Ok(None);

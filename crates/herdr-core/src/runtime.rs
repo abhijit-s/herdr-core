@@ -182,7 +182,8 @@ fn finish_reason(killed: bool, stopping: bool, host_shutdown: bool) -> &'static 
 
 impl Core {
     pub fn start(paths: Paths, info: CoreInfo) -> io::Result<Arc<Core>> {
-        let reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        let mut reg: Registry = read_state(&paths.state.join("terminals.json"))?;
+        crate::resume::prepare_state(&paths.state, &mut reg);
         let docs_path = paths.state.join("docs.json");
         let docs = read_state(&docs_path).unwrap_or_else(|e| {
             let _ = writeln!(io::stderr(), "core: cannot load documents, starting empty: {e}");
@@ -455,6 +456,9 @@ impl Core {
             self.save(&st);
             adopted
         };
+        for &id in &adopted {
+            self.reconcile_resume(id);
+        }
         let core = self.clone();
         let (instance, path) = (welcome.instance, path.to_path_buf());
         std::thread::spawn(move || core.read_holder(stream, instance, path));
@@ -531,6 +535,10 @@ impl Core {
                 }
             }
             let tail = tails.remove(&id).unwrap_or_default();
+            if let Some(resume) = &mut st.reg.terminals.get_mut(&id).expect("adopted").resume {
+                resume.adopt(h.pid, h.raw_offset);
+                self.resume_output(st, id, &tail, now_ms());
+            }
             let saved = if handover {
                 self.take_saved_screen(id)
             } else {
@@ -758,6 +766,9 @@ impl Core {
             (Ok(pid), Some(t)) if t.is_live() => {
                 let restarted = t.reason.is_some();
                 t.pid = Some(pid);
+                if let Some(resume) = &mut t.resume {
+                    resume.set_root(pid);
+                }
                 t.program_started_ms = Some(now_ms());
                 t.reason = None;
                 t.exit_code = None;
@@ -811,6 +822,9 @@ impl Core {
         };
         st.crash_tails.remove(&id);
         if let Some(t) = st.reg.terminals.get_mut(&id) {
+            if let Some(resume) = &mut t.resume {
+                crate::resume::remove_launch(&self.paths.state, resume.launch.take().as_deref());
+            }
             t.first_task_turn = None;
             let change = crate::status::reset(t);
             self.status_changed(st, id, change);
@@ -912,6 +926,11 @@ impl Core {
         {
             let mut st = self.lock();
             for &id in ids {
+                if st.killing.contains(&id)
+                    && let Some(resume) = st.reg.terminals.get_mut(&id).and_then(|t| t.resume.take())
+                {
+                    crate::resume::remove_launch(&self.paths.state, resume.launch.as_deref());
+                }
                 if st
                     .reg
                     .terminals
