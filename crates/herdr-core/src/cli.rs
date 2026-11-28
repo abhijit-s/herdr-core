@@ -138,6 +138,9 @@ pub fn command_names() -> Vec<String> {
 }
 
 pub fn main() -> i32 {
+    if let Some(code) = crate::platform::dump_login_environment() {
+        return code;
+    }
     let daemon = crate::platform::daemon_startup();
     client::remember_exe();
     let args: Vec<_> = if daemon { vec!["serve".into()] } else { std::env::args_os().skip(1).collect() };
@@ -577,21 +580,15 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             Out { json: r, human }
         }
         Cmd::Server { action: action @ (ServerCmd::Start | ServerCmd::Status | ServerCmd::Restart { .. }) } => {
-            match action {
-                ServerCmd::Restart { fresh } => restart(&paths, fresh)?,
-                ServerCmd::Start => start(&paths)?,
-                _ => {}
+            if let ServerCmd::Restart { fresh } = action {
+                restart(&paths, fresh)?;
             }
-            let r = if crate::platform::status_may_start_core() {
-                call("server.status", json!({}))?
-            } else {
-                let stream = if matches!(action, ServerCmd::Status) {
-                    client::require_existing(&paths)?
-                } else {
-                    client::connect_or_start_explicit(&paths)?
-                };
-                client::call(&stream, "server.status", json!({}))?
+            let stream = match action {
+                ServerCmd::Start | ServerCmd::Restart { fresh: true } => client::connect_or_start_explicit(&paths)?,
+                ServerCmd::Status if !crate::platform::status_may_start_core() => client::require_existing(&paths)?,
+                _ => client::connect_or_start(&paths)?,
             };
+            let r = client::call(&stream, "server.status", json!({})).map_err(|e| client::explain_closed(&paths, e))?;
             let id = r["core"]["id"].as_str().unwrap_or("?");
             let human = format!(
                 "core {} ({}) running, pid {}, up {}s",

@@ -28,6 +28,7 @@ fn lost_kept_terminal_restarts_in_place_in_its_last_folder() {
     s.env.push(("COLORTERM".into(), "".into()));
     s.env.push(("TERM_PROGRAM_VERSION".into(), "1".into()));
     s.env.push(("HC_KEEP_TEST".into(), "preserved".into()));
+    s.json(&["server", "start"]);
     let dir = s.root.join("last");
     std::fs::create_dir(&dir).unwrap();
     let canonical_dir = std::fs::canonicalize(&dir).unwrap();
@@ -100,7 +101,6 @@ fn failed_shell_restart_stays_live_and_retries() {
     s.env.push(("SHELL".into(), shell.display().to_string()));
     let t = run(&s, &["--keep", "--rm", "sleep", "100"]);
     s.json(&["server", "stop"]);
-    s.json(&["server", "start"]); // recovers with this SHELL
     let r = get(&s, &t);
     assert_eq!(r["state"], "live");
     assert!(r["finished_ms"].is_null());
@@ -140,6 +140,7 @@ fn recovery_saves_only_client_overrides_and_refreshes_the_core_environment() {
     s.json(&["server", "stop"]);
     s.env.retain(|(k, _)| k != "HC_KEEP_BASE");
     s.env.push(("HC_KEEP_BASE".into(), "fresh".into()));
+    s.json(&["server", "start"]);
     wait_until("recovery with fresh environment", || get(&s, t)["pid"].is_number());
     s.json(&["send", t, "printf 'recovery:%s:%s:%s\\n' \"$HC_KEEP_BASE\" \"$HC_KEEP_OVERRIDE\" \"$TERM\""]);
     wait_until("fresh base and saved overrides", || text(&s, t).contains("recovery:fresh:saved:vt100"));
@@ -181,7 +182,6 @@ fn paused_replacement() -> (Session, String, PausedHolder) {
     s.env.push(("SHELL".into(), s.root.join("missing-shell").display().to_string()));
     let t = run(&s, &["--keep", "sleep", "100"]);
     s.json(&["server", "stop"]);
-    s.json(&["server", "start"]); // recovers with this SHELL
     get(&s, &t); // Startup's first replacement fails; pause its holder before the retry.
     let mut holder = 0;
     wait_until("replacement holder", || {

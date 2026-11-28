@@ -17,39 +17,46 @@ const LAUNCHCTL: &str = "/bin/launchctl";
 const PREFIX: &str = "dev.herdr.core.";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A variable to set, or with no value to unset.
-type Setting = (Vec<u8>, Option<Vec<u8>>);
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Inherited {
-    /// The launcher's whole environment. A core given no `settings` (and any
-    /// core older than them) replaces launchd's environment with it.
     env: Vec<(Vec<u8>, Vec<u8>)>,
-    /// An autostart's: set (or, with no value, unset) on top of launchd's
-    /// environment instead, so the launcher's own variables never become the core's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    settings: Option<Vec<Setting>>,
+    #[serde(default)]
+    overlay: bool,
+    #[serde(default)]
+    unset: Vec<Vec<u8>>,
     limits: Vec<(libc::c_int, libc::rlim_t, libc::rlim_t)>,
 }
 
 impl Inherited {
-    /// `whole`: the core takes this process's environment; otherwise only what
-    /// `starter_setting` names, on top of launchd's.
-    fn capture(cmd: &Command, whole: bool) -> io::Result<Self> {
-        let mut env: BTreeMap<_, _> = std::env::vars_os().map(|(key, value)| (key, Some(value))).collect();
-        let mut settings: BTreeMap<_, _> =
-            env.iter().filter(|(key, _)| super::starter_setting(key)).map(|(k, v)| (k.clone(), v.clone())).collect();
-        let mut set = |key: OsString, value: Option<OsString>| {
-            env.insert(key.clone(), value.clone());
-            settings.insert(key, value);
-        };
+    fn capture(cmd: &Command, clean: bool) -> io::Result<Self> {
+        let mut env: BTreeMap<_, _> = if clean { BTreeMap::new() } else { std::env::vars_os().collect() };
+        let mut unset = Vec::new();
         for (key, value) in cmd.get_envs() {
-            set(key.to_owned(), value.map(OsStr::to_owned));
+            match value {
+                Some(value) => {
+                    env.insert(key.to_owned(), value.to_owned());
+                }
+                None => {
+                    env.remove(key);
+                    unset.push(key.as_encoded_bytes().to_vec());
+                }
+            }
         }
-        for key in [DETACH, DIRECT, "XPC_FLAGS"] {
-            set(key.into(), None);
+        for key in [DETACH, DIRECT, "XPC_FLAGS", "_HC_RESPONSIBLE_PID"] {
+            env.remove(OsStr::new(key));
+            unset.push(key.as_bytes().to_vec());
         }
-        set("XPC_SERVICE_NAME".into(), Some("0".into()));
+        if clean {
+            // The launchd domain can supply defaults, but cannot pick another session.
+            unset.extend(
+                super::SESSION_PATHS
+                    .iter()
+                    .chain(super::SSH_LOGIN)
+                    .filter(|&&key| !env.contains_key(OsStr::new(key)))
+                    .map(|key| key.as_bytes().to_vec()),
+            );
+        }
+        env.insert("XPC_SERVICE_NAME".into(), "0".into());
         let mut limits = Vec::new();
         // Darwin's RLIM_NLIMITS is not stable across OS versions. Ask the
         // running kernel for every slot rather than baking in a header's count.
@@ -64,15 +71,29 @@ impl Inherited {
             }
             limits.push((resource, limit.rlim_cur, limit.rlim_max));
         }
-        let env = env.into_iter().filter_map(|(k, v)| Some((k.into_vec(), v?.into_vec()))).collect();
-        let settings =
-            (!whole).then(|| settings.into_iter().map(|(k, v)| (k.into_vec(), v.map(OsString::into_vec))).collect());
-        Ok(Self { env, settings, limits })
+        Ok(Self {
+            env: env.into_iter().map(|(k, v)| (k.into_vec(), v.into_vec())).collect(),
+            overlay: clean,
+            unset,
+            limits,
+        })
+    }
+
+    fn environment_changes(
+        self,
+        current: impl Iterator<Item = OsString>,
+    ) -> impl Iterator<Item = (OsString, Option<OsString>)> {
+        let overlay = self.overlay;
+        current
+            .filter(move |_| !overlay)
+            .map(|key| (key, None))
+            .chain(self.unset.into_iter().map(|key| (OsString::from_vec(key), None)))
+            .chain(self.env.into_iter().map(|(key, value)| (OsString::from_vec(key), Some(OsString::from_vec(value)))))
     }
 
     /// Runs only in the newly forked core, before it creates any threads.
     fn restore(self) -> io::Result<()> {
-        for (resource, soft, hard) in self.limits {
+        for &(resource, soft, hard) in &self.limits {
             let mut current = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
             if unsafe { libc::getrlimit(resource, &mut current) } != 0 {
                 return Err(io::Error::last_os_error());
@@ -96,23 +117,12 @@ impl Inherited {
                 return Err(io::Error::other(format!("resource limit {resource} was clamped instead of inherited")));
             }
         }
-        let settings = match self.settings {
-            Some(settings) => settings,
-            None => {
-                unsafe {
-                    for (key, _) in std::env::vars_os() {
-                        std::env::remove_var(key);
-                    }
-                }
-                self.env.into_iter().map(|(k, v)| (k, Some(v))).collect()
-            }
-        };
-        for (key, value) in settings {
-            let key = OsString::from_vec(key);
+        for (key, value) in self.environment_changes(std::env::vars_os().map(|(key, _)| key)) {
             unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, OsString::from_vec(value)),
-                    None => std::env::remove_var(key),
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
                 }
             }
         }
@@ -156,8 +166,7 @@ pub fn prepare_core() {
         paths.create_dirs()?;
         let mut cmd = Command::new(std::env::current_exe()?);
         cmd.arg("serve");
-        // Whoever ran `serve` itself chose its environment.
-        launch(&cmd, &paths.state.join("core.log"), true)
+        launch(&cmd, &paths.state.join("core.log"), false)
     })();
     match result {
         Ok(()) => std::process::exit(0),
@@ -177,11 +186,11 @@ fn ssh() -> bool {
 
 /// Only `serve` uses this path. Holders and programs inherit its coalition.
 /// SSH is already outside the app, and must retain its existing lifetime.
-pub fn spawn(cmd: &mut Command, log: &Path) -> bool {
+pub fn spawn(cmd: &mut Command, log: &Path, clean: bool) -> bool {
     if ssh() {
         return false;
     }
-    match launch(cmd, log, false) {
+    match launch(cmd, log, clean) {
         Ok(()) => true,
         Err(error) => {
             fallback(log, &error);
@@ -200,9 +209,9 @@ fn fallback(log: &Path, error: &io::Error) {
     }
 }
 
-fn launch(cmd: &Command, log: &Path, whole: bool) -> io::Result<()> {
+fn launch(cmd: &Command, log: &Path, clean: bool) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    let inherited = Inherited::capture(cmd, whole)?;
+    let inherited = Inherited::capture(cmd, clean)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?;
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     remove_stale(&domain, now);
@@ -603,13 +612,11 @@ mod tests {
             .env(DETACH, "old")
             .env(DIRECT, "1")
             .env("XPC_FLAGS", "0x2");
-        let captured = Inherited::capture(&cmd, true).unwrap();
+        let captured = Inherited::capture(&cmd, false).unwrap();
         let received: Inherited = serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
         assert_eq!(received.limits, captured.limits);
         assert!(received.limits.len() > libc::RLIMIT_NOFILE as usize);
-        assert!(received.settings.is_none(), "a whole handoff replaces launchd's environment");
         let env: BTreeMap<_, _> = received.env.into_iter().collect();
-        assert!(env.contains_key(b"PATH".as_slice()), "the whole environment");
         assert_eq!(env.get(b"LESS_TERMCAP_md".as_slice()), Some(&b"\x1b[1m\r\xff".to_vec()));
         for name in [b"HOME".as_slice(), DETACH.as_bytes(), DIRECT.as_bytes(), b"XPC_FLAGS".as_slice()] {
             assert!(!env.contains_key(name));
@@ -618,28 +625,33 @@ mod tests {
     }
 
     #[test]
-    fn an_autostart_hands_over_only_hc_settings_and_an_older_core_takes_the_whole_environment() {
+    fn an_implicit_launch_overlays_the_launchd_environment() {
         let mut cmd = Command::new("hc");
-        cmd.env("HC_SESSION", "dev").env("HC_RUNTIME", "1").env_remove("HC_SCOPE").env(DETACH, "old");
-        let bytes = serde_json::to_vec(&Inherited::capture(&cmd, false).unwrap()).unwrap();
-        let received: Inherited = serde_json::from_slice(&bytes).unwrap();
-        let settings: BTreeMap<_, _> = received.settings.unwrap().into_iter().collect();
-        assert!(!settings.contains_key(b"PATH".as_slice()), "PATH is launchd's");
-        assert_eq!(settings.get(b"HC_SESSION".as_slice()), Some(&Some(b"dev".to_vec())));
-        assert_eq!(settings.get(b"HC_RUNTIME".as_slice()), Some(&Some(b"1".to_vec())));
-        for name in [b"HC_SCOPE".as_slice(), DETACH.as_bytes(), DIRECT.as_bytes(), b"XPC_FLAGS".as_slice()] {
-            assert_eq!(settings.get(name), Some(&None), "{}", String::from_utf8_lossy(name));
+        cmd.env("EDITOR", "login-editor").env_remove("REMOVE_ME");
+        let inherited = Inherited::capture(&cmd, true).unwrap();
+        let mut manager: BTreeMap<OsString, OsString> = [
+            ("MANAGER_ONLY", "desktop"),
+            ("EDITOR", "desktop-editor"),
+            ("HC_SOCKET", "/wrong.sock"),
+            ("SSH_CONNECTION", "old login"),
+            ("REMOVE_ME", "old value"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let changes = inherited.environment_changes(manager.keys().cloned().collect::<Vec<_>>().into_iter());
+        for (key, value) in changes {
+            if let Some(value) = value {
+                manager.insert(key, value);
+            } else {
+                manager.remove(&key);
+            }
         }
-        assert_eq!(settings.get(b"XPC_SERVICE_NAME".as_slice()), Some(&Some(b"0".to_vec())));
-        // A core from before `settings` still detaches, with the launcher's environment as it always did.
-        #[derive(serde::Deserialize)]
-        struct Older {
-            env: Vec<(Vec<u8>, Vec<u8>)>,
+        assert_eq!(manager.get(OsStr::new("MANAGER_ONLY")).unwrap(), "desktop");
+        assert_eq!(manager.get(OsStr::new("EDITOR")).unwrap(), "login-editor");
+        for key in ["HC_SOCKET", "SSH_CONNECTION", "REMOVE_ME"] {
+            assert!(!manager.contains_key(OsStr::new(key)), "{key}");
         }
-        let older: BTreeMap<_, _> = serde_json::from_slice::<Older>(&bytes).unwrap().env.into_iter().collect();
-        assert!(older.contains_key(b"PATH".as_slice()));
-        assert_eq!(older.get(b"HC_SESSION".as_slice()), Some(&b"dev".to_vec()));
-        assert!(!older.contains_key(DETACH.as_bytes()));
     }
 
     #[test]
