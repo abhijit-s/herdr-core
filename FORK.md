@@ -106,6 +106,24 @@ The fork runs upstream's `PtyIo` (`de6cc39`, 0.1.19): the holder's master is non
 
 **Branch bases.** Fork feature branches start from fork master, and fork master tracks `upstream/master` through these syncs. A branch for an upstream PR starts from `upstream/master` and holds only that change, since a PR offers every commit upstream lacks. Each sync also checks every open upstream PR branch against `upstream/master`: one that conflicts gets `upstream/master` merged in, its build and tests rerun, and is pushed; one that still merges cleanly is left alone, so the PR gets no noise commits.
 
+### 2026-11-28: `2e8043a..04b6df6` (`upstream/master` up to `04b6df6`)
+
+Merged 2 upstream commits into the fork's `16d6062`. One conflict. No fork fix needed.
+
+- `bcd1a97` one kitty graphics reply per command (`relay.rs`, `relay/graphics.rs`, `viewers.rs`) and `04b6df6` the bundled Ghostty version in XTVERSION replies (`ghostty-vt` `build.rs`, `api/run.rs`, `kept.rs`), taken as written.
+- `runtime.rs` `adopt`: upstream sets the screen's XTVERSION (`set_xtversion`) where the fork restores a saved title stack (`set_title_stack`) on the adopted screen. Both kept, the title stack first, then the version, before the tail replays; neither reads the other.
+- Held back: `c0a21b9` (fix: isolate core autostart environment), on `upstream/master` after `04b6df6`. It is upstream's own take on what `fix/autostart-service-env` does (an autostarted core no longer takes the caller's environment), with a different rule: login shell exports on Linux and macOS, the service manager's settings under them, the caller's extra PATH directories appended; `platform/linux_login.rs` becomes `platform/unix_login.rs`. A trial merge conflicts in 11 files, most of them the fork's service-manager code. Whether the fork keeps its rule or takes upstream's is a design choice, so it waits for the next sync.
+- Open upstream PR branches against `upstream/master` (`git merge-tree`): `perf/holder-gather` (#246) and `up/observe-eof` (#184) merge cleanly. `up/title-stack` (#265) now conflicts in `runtime.rs`, the same `set_xtversion` hunk; not updated here, since pushing it changes the upstream PR.
+- Built in its own target dir with Zig 0.16.0; clippy with Rust 1.95.0 (CI's).
+
+| Gate (macOS) | branch |
+| --- | --- |
+| `cargo fmt --check` | pass |
+| clippy `--all-targets -D warnings`, Rust 1.95.0 | pass |
+| `cargo test --locked --no-fail-fast`, Rust 1.95.0 | 631 passed, 0 failed, 3 ignored (46 targets) |
+
+- Not run: master's suite for a side-by-side count, `cargo deny`, Linux and Windows suites.
+
 ### 2026-11-27: `329cb66..2e8043a` (`upstream/master`)
 
 Merged `upstream/master` (2 commits) into the fork's `90b71ff` (merge `ac07c27`). No conflicts. One fork fix, in tests only.
