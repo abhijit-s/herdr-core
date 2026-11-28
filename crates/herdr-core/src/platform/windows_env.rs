@@ -1,7 +1,7 @@
 //! Fresh user/system settings without losing process-local runtime variables.
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -44,21 +44,6 @@ pub(super) fn refresh(env: &mut BTreeMap<String, String>) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// A core's base: the user's settings as a new login gets them, plus hc's own
-/// settings from this process. Only an explicit start or restart hands over more.
-pub(super) fn service_base() -> BTreeMap<String, String> {
-    let mut env = BTreeMap::new();
-    if let Err(error) = refresh(&mut env) {
-        let _ = writeln!(io::stderr(), "cannot read the Windows user environment; the core takes this one: {error}");
-        return std::env::vars().collect();
-    }
-    for (key, value) in std::env::vars().filter(|(key, _)| super::starter_setting(key.as_ref())) {
-        env.retain(|k, _| !k.eq_ignore_ascii_case(&key));
-        env.insert(key, value);
-    }
-    env
 }
 
 fn expand_path(path: &str, token: HANDLE) -> io::Result<String> {

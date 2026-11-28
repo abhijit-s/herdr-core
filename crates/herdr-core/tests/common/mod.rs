@@ -314,7 +314,7 @@ pub fn write_new_build(to: &std::path::Path) {
 }
 
 /// The test runner's python3 interpreter, by its full path. A core a test starts
-/// on its own takes the service manager's PATH (launchd's, systemd's), where
+/// on its own takes a login shell's PATH, not the runner's, where
 /// python3 may be a version manager's shim that fails with a session's HOME and
 /// XDG dirs; the interpreter itself, asked here with the runner's environment, works.
 pub fn python3() -> &'static str {

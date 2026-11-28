@@ -68,7 +68,7 @@ const NO_MANAGER: &str = "hc: no systemd user manager here: the core ends with w
 
 /// Starts `cmd` as a user service with stderr appended to `log`. None: no
 /// user manager here, start it the plain way.
-pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
+pub fn spawn(cmd: &Command, log: &Path, clean: bool) -> Option<io::Result<()>> {
     let run = match manager() {
         Ok(run) => run,
         Err(warn) => {
@@ -85,13 +85,11 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
             false
         }
     };
-    let core = cmd.get_args().next() == Some(OsStr::new("serve"));
-    let mut caller = starter_env(super::utf8_vars(), core);
+    let mut caller: BTreeMap<String, String> = if clean { BTreeMap::new() } else { super::utf8_vars().collect() };
     let mut unset: Vec<&str> = super::SSH_LOGIN.to_vec();
     for (k, v) in cmd.get_envs() {
         let Some(k) = k.to_str() else { continue };
         match v.and_then(OsStr::to_str) {
-            Some(v) if core && !command_var_reaches_core(k, v, std::env::var(k).ok().as_deref()) => None,
             Some(v) => caller.insert(k.into(), v.into()),
             None => {
                 unset.push(k);
@@ -101,6 +99,10 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
     }
     let mut env = service_env(caller);
     env.insert("XDG_RUNTIME_DIR".into(), run.display().to_string());
+    if clean {
+        // Ordinary user-manager exports are the base, but may not select a different core.
+        unset.extend(super::SESSION_PATHS.iter().copied().filter(|key| !env.contains_key(*key)));
+    }
     let args: Vec<&OsStr> = cmd.get_args().collect();
     let name = format!("hc-{}-{}", args.first().and_then(|a| a.to_str()).unwrap_or("run"), &super::random_hex()[..8]);
     let here = std::env::current_dir().ok().filter(|d| d.is_dir()).unwrap_or_else(|| PathBuf::from("/"));
@@ -121,8 +123,6 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
     let out = Command::new("systemd-run")
         .env_clear()
         .envs(&env)
-        // Found on our PATH; a core's EnvironmentFile leaves PATH to the manager.
-        .envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
         .args(unit_args(&name, &dir.join("environment"), &unset, log, &here, version))
         .args(guarded.then(|| shutdown_order(cmd, log)).into_iter().flat_map(|order| [OsString::from("-p"), order]))
         .args(command_arguments.iter().map(|argument| literal(argument)))
@@ -220,26 +220,6 @@ fn write_environment(run: &Path, name: &str, env: &BTreeMap<String, String>) -> 
         return Err(e);
     }
     Ok(dir)
-}
-
-/// What a service takes from the process starting it. A core's base is the
-/// user manager's environment, plus hc's settings, the login session's
-/// variables (see SESSION) and what an ssh login's profile changed
-/// (`command_var_reaches_core`). A holder is started by its core and takes the core's.
-/// The ssh markers stay so `service_env` can tell an ssh login, then drops them.
-fn starter_env(vars: impl Iterator<Item = (String, String)>, core: bool) -> BTreeMap<String, String> {
-    vars.filter(|(k, _)| !core || starter_key(k)).collect()
-}
-
-fn starter_key(k: &str) -> bool {
-    super::starter_setting(OsStr::new(k)) || SESSION.contains(&k) || super::SSH_LOGIN.contains(&k)
-}
-
-/// Whether a variable set on the start command reaches a core: a login
-/// environment captured over ssh (`linux_login`) repeats the caller's, and a
-/// core leaves those to the user manager, keeping only what the login changed.
-fn command_var_reaches_core(k: &str, v: &str, caller: Option<&str>) -> bool {
-    starter_key(k) || caller != Some(v)
 }
 
 /// The caller's environment as a service gets it: no ssh login's session, no
@@ -433,17 +413,7 @@ fn logout_survival(linger: Option<bool>, stop_delay: Option<&str>) -> Option<boo
 }
 
 fn login_user() -> Option<String> {
-    // getpwuid_r keeps simultaneous status requests from sharing libc's buffer.
-    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut buffer = vec![0u8; 16384];
-    let mut result = std::ptr::null_mut();
-    let error = unsafe {
-        libc::getpwuid_r(libc::getuid(), entry.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut result)
-    };
-    if error != 0 || result.is_null() {
-        return None;
-    }
-    Some(unsafe { std::ffi::CStr::from_ptr((*result).pw_name) }.to_string_lossy().into_owned())
+    super::unix::account().map(|(name, _)| name.to_string_lossy().into_owned())
 }
 
 /// Linger keeps the user manager alive independently of logind's stop delay.
@@ -695,45 +665,6 @@ mod tests {
         assert_eq!(ssh.keys().collect::<Vec<_>>(), ["HC_SESSION", "PATH"]);
         let desktop = super::service_env(map(&[("DISPLAY", ":0"), ("PATH", "/usr/bin")]));
         assert!(desktop.contains_key("DISPLAY"), "a desktop that doesn't tell systemd keeps its display");
-    }
-
-    #[test]
-    fn a_core_takes_the_managers_environment_but_a_holder_takes_its_cores() {
-        let vars = || {
-            map(&[
-                ("HC_SESSION", "dev"),
-                ("HC_HEARTBEAT_MS", "50"),
-                ("HC_TERMINAL_ID", "t3"),
-                ("HC_SCOPE", "caller-sweep"),
-                ("XDG_STATE_HOME", "/home/u/.state"),
-                ("DISPLAY", ":0"),
-                ("PATH", "/home/u/.local/bin"),
-                ("CLAUDE_CODE_CHILD_SESSION", "1"),
-                ("HERDR_PANE_ID", "wBE:p2"),
-            ])
-            .into_iter()
-        };
-        let core = super::service_env(super::starter_env(vars(), true));
-        assert_eq!(core.keys().collect::<Vec<_>>(), ["DISPLAY", "HC_HEARTBEAT_MS", "HC_SESSION", "XDG_STATE_HOME"]);
-        assert_eq!(super::starter_env(vars(), false), vars().collect());
-        let over_ssh = vars().chain([("SSH_CONNECTION".to_owned(), "100.1.1.1 1 100.2.2.2 22".to_owned())]);
-        let core = super::service_env(super::starter_env(over_ssh, true));
-        assert_eq!(
-            core.keys().collect::<Vec<_>>(),
-            ["HC_HEARTBEAT_MS", "HC_SESSION", "XDG_STATE_HOME"],
-            "no ssh login's display"
-        );
-    }
-
-    #[test]
-    fn a_core_takes_only_what_an_ssh_logins_profile_changed() {
-        let reaches = super::command_var_reaches_core;
-        assert!(!reaches("CLAUDE_CODE_CHILD_SESSION", "1", Some("1")), "the caller's own stays out");
-        assert!(!reaches("PATH", "/usr/bin", Some("/usr/bin")));
-        assert!(reaches("PATH", "/home/u/.local/bin:/usr/bin", Some("/usr/bin")), "the profile's PATH");
-        assert!(reaches("GOPATH", "/home/u/go", None), "a profile's export");
-        assert!(reaches("HC_SESSION", "dev", Some("dev")), "hc's settings always");
-        assert!(reaches("XDG_RUNTIME_DIR", "/run/user/1000", Some("/run/user/1000")));
     }
 
     #[test]

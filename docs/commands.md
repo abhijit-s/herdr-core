@@ -549,10 +549,10 @@ Start, stop or inspect the core
 Usage: hc server [OPTIONS] <COMMAND>
 
 Commands:
-  start    Start the core with this shell's environment for new terminals
+  start    Start a stopped core using this shell's environment
   stop     
   status   
-  restart  Restart the core (e.g. after an update) with its own environment; programs keep running
+  restart  Restart the core with its existing environment. Running programs stay alive
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -563,31 +563,33 @@ Options:
 ## hc server restart
 
 ```text
-Restart the core (e.g. after an update) with its own environment; programs keep running
+Restart the core with its existing environment. Running programs stay alive.
+
+If the core is stopped, it starts with the platform's default environment. Use --fresh to take this shell's environment.
 
 Usage: hc server restart [OPTIONS]
 
 Options:
-      --fresh  Take this shell's environment for new terminals; run from a terminal outside Herdr
-      --json   JSON output even in a terminal
-  -h, --help   Print help
-```
+      --fresh
+          Take this shell's environment for new terminals; run from a terminal outside Herdr
 
-## hc server start
-
-```text
-Start the core with this shell's environment for new terminals.
-
-A core that any other command, the app or a plugin starts takes the service manager's environment instead: launchd's on macOS, the systemd user manager's on Linux, the user's settings on Windows. Where no service manager starts it (an ssh login on macOS, Linux without a systemd user manager), it takes its starter's.
-
-Usage: hc server start [OPTIONS]
-
-Options:
       --json
           JSON output even in a terminal
 
   -h, --help
           Print help (see a summary with '-h')
+```
+
+## hc server start
+
+```text
+Start a stopped core using this shell's environment
+
+Usage: hc server start [OPTIONS]
+
+Options:
+      --json  JSON output even in a terminal
+  -h, --help  Print help
 ```
 
 ## hc server status

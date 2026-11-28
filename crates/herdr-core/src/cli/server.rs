@@ -4,52 +4,19 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum ServerCmd {
-    /// Start the core with this shell's environment for new terminals.
-    ///
-    /// A core that any other command, the app or a plugin starts takes the service manager's environment instead: launchd's on macOS, the systemd user manager's on Linux, the user's settings on Windows. Where no service manager starts it (an ssh login on macOS, Linux without a systemd user manager), it takes its starter's.
+    /// Start a stopped core using this shell's environment.
     Start,
     Stop,
     Status,
-    /// Restart the core (e.g. after an update) with its own environment; programs keep running.
+    /// Restart the core with its existing environment. Running programs stay alive.
+    ///
+    /// If the core is stopped, it starts with the platform's default environment.
+    /// Use --fresh to take this shell's environment.
     Restart {
         /// Take this shell's environment for new terminals; run from a terminal outside Herdr.
         #[arg(long)]
         fresh: bool,
     },
-}
-
-fn caller_environment() -> std::collections::BTreeMap<String, String> {
-    handed_over(crate::platform::utf8_vars())
-}
-
-/// A login profile's `hc` runs inside `linux_login`'s capture, whose mark
-/// (`platform/linux_login.rs` `CAPTURING`) is not the shell's own.
-pub(super) fn handed_over(vars: impl Iterator<Item = (String, String)>) -> std::collections::BTreeMap<String, String> {
-    vars.filter(|(k, _)| !k.starts_with('=') && k != "HC_LOGIN_CAPTURE").collect()
-}
-
-/// Only an explicit start gives a new core this shell's environment; a core a
-/// client starts on its own takes the service manager's.
-pub(super) fn start(paths: &Paths) -> Result<(), RpcError> {
-    if client::connect_existing(paths).is_some() {
-        return Ok(());
-    }
-    if std::env::var_os("HC_TERMINAL_ID").is_some() {
-        eprintln!(
-            "hc: this shell carries Herdr's environment; start the core from a terminal outside Herdr or unset unwanted variables first"
-        );
-    }
-    match crate::restart::prepare_start(paths, caller_environment()) {
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            eprintln!(
-                "hc: a core is already starting with its own environment; hc server restart --fresh gives it this shell's"
-            );
-            Ok(())
-        }
-        result => result.map_err(|e| {
-            RpcError::new("unavailable", e.to_string(), "set PATH, or let any hc command start the core on its own")
-        }),
-    }
 }
 
 pub(super) fn restart(paths: &Paths, fresh: bool) -> Result<(), RpcError> {
@@ -58,7 +25,8 @@ pub(super) fn restart(paths: &Paths, fresh: bool) -> Result<(), RpcError> {
             "hc: this shell carries Herdr's environment; run --fresh from a terminal outside Herdr or unset unwanted variables first"
         );
     }
-    let environment = caller_environment();
+    let environment: std::collections::BTreeMap<_, _> =
+        crate::platform::utf8_vars().filter(|(k, _)| !k.starts_with('=')).collect();
     let Some(stream) = client::connect_existing(paths) else {
         if fresh {
             crate::restart::prepare_start(paths, environment).map_err(|e| {

@@ -23,14 +23,20 @@ Builds are available for Linux and macOS on x86_64 and aarch64, and Windows on x
 Linux builds are static. On Windows, templates and quoted shell commands need `sh` on PATH, such as Git for Windows provides.
 
 Run `hc update` to update. Running terminals keep running.
-Updates and `hc server restart` keep the environment the core started with;
-run `hc server restart --fresh` from a terminal outside Herdr to use that shell's
-environment without ending programs.
-`hc server start` gives a new core that shell's environment. A core that starts on its own, because any other `hc` command, the app or a plugin found none running, takes the service manager's instead: launchd's on macOS, the systemd user manager's on Linux, the user's settings on Windows. Only hc's own settings (`HC_*`, `HERDR_RELEASES_URL`, session paths) come from whatever started it. Where no service manager starts the core (an ssh login on macOS, Linux without a systemd user manager), it still takes its starter's environment. Set what every terminal needs there (`launchctl setenv`, `~/.config/environment.d/`), or start the core with `hc server start`.
-The update from an older core to 0.1.19 uses the updater's environment once,
-because older cores can't save it for the next core.
+When a command or app starts a stopped core, Linux and macOS load exports from
+your non-interactive login shell, including macOS `.zprofile` settings. Login
+PATH takes precedence. Directories available only in the calling shell are
+appended. Starts through systemd or launchd also keep settings from the user
+service manager, with login exports taking precedence. On Windows, programs
+use the user and system environment, including PATH.
 
-If saving fails, the restart still goes ahead with the launcher's environment.
+Updates and `hc server restart` keep the running core's environment.
+Use `hc server start` for a stopped core or `hc server restart --fresh` to
+adopt the environment of a shell outside Herdr.
+An update that starts the replacement implicitly without a saved environment
+uses the platform defaults.
+
+If saving fails, the restart still goes ahead using the start rules above.
 Saved settings expire after three minutes and cannot carry over to another boot
 on Linux or macOS. On Windows, a restart cut short by a fast reboot can reuse them
 once. A plain SIGTERM keeps terminals and screens, but does not save settings.
@@ -177,7 +183,7 @@ cargo build --locked -p herdr-core
 just check
 ```
 
-`just install` installs this checkout and restarts your core. Running terminals keep running. A running core keeps its environment; if none is running, the one it starts takes the service manager's environment like any core that starts on its own, and without a service manager only the login's own variables (PATH, HOME, USER, SHELL, locale, SSH agent and markers, display, session paths; see `scripts/restart-core.sh`), never the rest of the build shell's.
+`just install` installs this checkout and restarts your core. Running terminals keep running. A running core keeps its environment; if none is running, the one it starts gets only the login's own variables (PATH, HOME, USER, SHELL, locale, SSH agent and markers, display, session paths; see `scripts/restart-core.sh`), never the rest of the build shell's.
 
 `just docs` refreshes the command reference. `just docs-check` checks it and the examples; CI runs the same tests.
 
