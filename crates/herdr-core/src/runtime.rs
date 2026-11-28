@@ -553,6 +553,7 @@ impl Core {
             if exact && let Some(titles) = titles {
                 screen.set_title_stack(titles);
             }
+            screen.set_xtversion(&st.reg.terminals[&id].identity);
             let replay_from =
                 if exact { h.saved_offset.saturating_sub(h.raw_offset).min(tail.len() as u64) as usize } else { 0 };
             // Through a relay, like live output, so requests the screen doesn't keep are seen.
@@ -567,7 +568,6 @@ impl Core {
             }
             let reports = screen.take_status_reports();
             let rec = st.reg.terminals.get_mut(&id).expect("live id");
-            screen.set_xtversion(&rec.identity);
             rec.title = screen.title();
             if let Some(on) = relay.win32_input {
                 rec.win32_input = on;
